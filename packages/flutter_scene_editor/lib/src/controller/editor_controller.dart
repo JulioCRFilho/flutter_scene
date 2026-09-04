@@ -781,27 +781,29 @@ class EditorController extends ChangeNotifier
     notifyListeners();
   }
 
-  /// Restores the authored pose over the animated one in place: when a
-  /// preview is loaded, its targets (and any previewed prefab members, such
-  /// as bones) snap back to what the Outliner and Inspector show; with no
-  /// preview loaded, the selected nodes do. The animation stays loaded and
-  /// capture state survives, so playback and scrubbing keep working.
+  /// Restores every node to its authored pose without touching the loaded
+  /// animation: each live node is written back to the document transform the
+  /// Outliner and Inspector show, so anything that drifted — whether from
+  /// animation preview, gizmo posing, or scrubbing — snaps back. Previewed
+  /// prefab members (bones inside imported instances), which have no document
+  /// node to look up, are restored from their captured live transforms.
+  /// Playback pauses so the restored pose stays visible (a running ticker
+  /// would otherwise re-apply the animated pose on the next frame), but the
+  /// animation stays loaded on the playhead and capture state survives, so
+  /// playback and scrubbing keep working.
   void restoreOriginalPose() {
-    final id = _previewAnimation;
-    if (id != null && document.animations[id] != null) {
-      _restorePreviewedNodes(keepCaptures: true);
-      notifyListeners();
-      return;
+    _stopTicker();
+    for (final entry in document.nodes.entries) {
+      final live = _liveById[entry.key];
+      if (live == null) continue;
+      applyTransformSpec(live, entry.value.transform);
     }
-    var touched = false;
-    for (final nodeId in selection.ids) {
-      final spec = document.nodes[nodeId]?.transform;
-      final live = _liveById[nodeId];
-      if (spec == null || live == null) continue;
-      applyTransformSpec(live, spec);
-      touched = true;
+    // Prefab members (bones inside imported instances) have no document node
+    // to look up; restore them from their captured live transforms.
+    for (final entry in _prePreviewMemberTransforms.entries) {
+      applyTransformSpec(entry.key, entry.value);
     }
-    if (touched) notifyListeners();
+    notifyListeners();
   }
 
   /// Moves the playhead to [time] (wrapping or clamping per the loop mode)
@@ -1488,6 +1490,7 @@ class EditorController extends ChangeNotifier
   Future<void> undo() async {
     if (!history.canUndo) return;
     final transaction = history.transactions[history.cursor - 1];
+    _pausePreviewFor(transaction.records);
     session.undo();
     await _reflect(transaction);
     notifyListeners();
@@ -1497,9 +1500,27 @@ class EditorController extends ChangeNotifier
   Future<void> redo() async {
     if (!history.canRedo) return;
     final transaction = history.transactions[history.cursor];
+    _pausePreviewFor(transaction.records);
     session.redo();
     await _reflect(transaction);
     notifyListeners();
+  }
+
+  /// Pauses a running animation preview when [records] touch any of its
+  /// channel targets. Reverting (or re-applying) a posed node while the
+  /// preview plays is otherwise invisible: the next tick re-applies the
+  /// animated pose over the just-reflected document state, so the edit never
+  /// shows and undo looks broken. The animation stays loaded on the playhead;
+  /// resuming re-poses from there.
+  void _pausePreviewFor(Iterable<ChangeRecord> records) {
+    if (!previewPlaying) return;
+    final id = _previewAnimation;
+    final spec = id == null ? null : document.animations[id];
+    if (spec == null) return;
+    final targets = {for (final channel in spec.channels) channel.target};
+    if (records.any((record) => targets.contains(record.targetId))) {
+      _stopTicker();
+    }
   }
 
   /// Bumped on every live transform preview, so every open viewport repaints

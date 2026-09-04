@@ -1591,10 +1591,9 @@ class _RestorePoseButton extends StatelessWidget {
     return Tooltip(
       message:
           'Original pose\n\n'
-          'Puts every node of the loaded animation back to its authored pose '
-          '(what the Outliner shows) — bones included — while keeping the '
-          'animation loaded on the playhead.\n\n'
-          'With no animation loaded it resets the selected nodes instead.',
+          'Puts every node back to its authored pose (what the Outliner '
+          'shows) — bones included — while keeping the animation loaded on '
+          'the playhead. Playback pauses; press Play to resume.',
       child: InkWell(
         onTap: controller.restoreOriginalPose,
         child: Container(
