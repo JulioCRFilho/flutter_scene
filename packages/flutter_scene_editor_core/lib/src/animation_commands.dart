@@ -287,7 +287,8 @@ bool _payloadDiffers(PayloadSpec? payload, Uint8List bytes) {
   final channels = <AnimationChannelSpec>[];
   var placed = false;
   for (final c in animation.channels) {
-    final matches = c.target == target &&
+    final matches =
+        c.target == target &&
         c.property == property &&
         (!memberTargeting || (c.targetName ?? '') == (targetName ?? ''));
     if (matches) {
@@ -1531,7 +1532,11 @@ final keyPose = CommandEntry(
     final nodes = [
       for (final id in nodeIds)
         ctx.document.node(id) ??
-            (throw CommandException('Node not found: ${id.toToken()}')),
+            (throw CommandException(
+              'Node ${id.toToken()} is not in the host document (it is '
+              'prefab-internal). Key it via setAnimationKeyframes with '
+              'nodeId=<instance id> and targetName=<member name>.',
+            )),
     ];
     final properties = [
       AnimationProperty.translation,

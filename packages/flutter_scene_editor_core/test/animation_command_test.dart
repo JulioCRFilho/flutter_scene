@@ -174,18 +174,12 @@ void main() {
       // Alpha joins the timeline first, then Bravo — that order is stable.
       key(alpha, 'translation', 0.0);
       key(bravo, 'translation', 0.0);
-      expect(
-        _nodeOrder(h.doc.animations[animationId]!),
-        [alpha, bravo],
-      );
+      expect(_nodeOrder(h.doc.animations[animationId]!), [alpha, bravo]);
 
       // Rewriting Alpha's existing channel must not demote it below Bravo
       // (the timeline groups each node under its first-appearance header).
       key(alpha, 'translation', 1.0);
-      expect(
-        _nodeOrder(h.doc.animations[animationId]!),
-        [alpha, bravo],
-      );
+      expect(_nodeOrder(h.doc.animations[animationId]!), [alpha, bravo]);
 
       // A genuinely new channel for Alpha (rotation) appends to the channel
       // list, but the node order still reads Alpha then Bravo — the timeline
@@ -198,10 +192,7 @@ void main() {
           for (final c in spec.channels)
             if (c.target == alpha) c.property,
         ],
-        [
-          AnimationProperty.translation,
-          AnimationProperty.rotation,
-        ],
+        [AnimationProperty.translation, AnimationProperty.rotation],
       );
     });
 
@@ -212,23 +203,16 @@ void main() {
       final alpha = _addCube(h, 'Alpha');
       final bravo = _addCube(h, 'Bravo');
 
-      void key(LocalId node, double time) => _run(
-            h,
-            'setAnimationKeyframe',
-            {
-              'animationId': animationId.toToken(),
-              'nodeId': node.toToken(),
-              'property': 'translation',
-              'time': time,
-            },
-          );
+      void key(LocalId node, double time) => _run(h, 'setAnimationKeyframe', {
+        'animationId': animationId.toToken(),
+        'nodeId': node.toToken(),
+        'property': 'translation',
+        'time': time,
+      });
 
       key(alpha, 0.0);
       key(bravo, 0.0);
-      expect(
-        _nodeOrder(h.doc.animations[animationId]!),
-        [alpha, bravo],
-      );
+      expect(_nodeOrder(h.doc.animations[animationId]!), [alpha, bravo]);
 
       // Dropping Alpha's only channel removes it from the timeline...
       _run(h, 'removeAnimationKeyframe', {
@@ -242,10 +226,7 @@ void main() {
       // ...and re-keying re-adds it at the bottom: removed-and-re-added is
       // the one sanctioned reordering.
       key(alpha, 0.0);
-      expect(
-        _nodeOrder(h.doc.animations[animationId]!),
-        [bravo, alpha],
-      );
+      expect(_nodeOrder(h.doc.animations[animationId]!), [bravo, alpha]);
     });
 
     test('re-keying the same time replaces the value', () {
@@ -741,7 +722,11 @@ void main() {
       final animationId = h.doc.animations.keys.single;
       // A moving translation path plus a scale path the author keeps.
       for (final t in const [0.0, 1.0]) {
-        _run(h, 'setAnimationKeyframe', translateKey(animationId.toToken(), node, t, t));
+        _run(
+          h,
+          'setAnimationKeyframe',
+          translateKey(animationId.toToken(), node, t, t),
+        );
         _run(h, 'setAnimationKeyframe', {
           'animationId': animationId.toToken(),
           'nodeId': node.toToken(),
@@ -873,10 +858,7 @@ void main() {
       final animation = h.doc.animations[animationId]!;
       expect(animation.channels, hasLength(1));
       expect(animation.channels.single.target, mover);
-      expect(
-        animation.channels.single.property,
-        AnimationProperty.translation,
-      );
+      expect(animation.channels.single.property, AnimationProperty.translation);
 
       // Undo restores every dropped path at once.
       expect(h.history.undo(), isTrue);
@@ -906,6 +888,157 @@ void main() {
         () => _run(h, 'cleanAnimationChannels', {'animationId': token}),
         throwsA(isA<CommandException>()),
       );
+    });
+  });
+
+  group('prefab member channels', () {
+    test('member targeting stores the instance id with the member name', () {
+      final h = _harness();
+      _run(h, 'createAnimation', {'name': 'Open'});
+      final animationId = h.doc.animations.keys.single;
+      final instance = _addCube(h, 'chest0');
+
+      _run(h, 'setAnimationKeyframes', {
+        'animationId': animationId.toToken(),
+        // The channel is authored against the instance (a real host node);
+        // the lid is named, not addressed by id.
+        'nodeId': instance.toToken(),
+        'targetName': 'Cube.002',
+        'property': 'translation',
+        'keys': [
+          {
+            'time': 0.0,
+            'translation': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+          },
+          {
+            'time': 1.0,
+            'translation': {'x': 0.0, 'y': 1.5, 'z': 0.0},
+          },
+        ],
+      });
+
+      final animation = h.doc.animations[animationId]!;
+      expect(animation.channels, hasLength(1));
+      final channel = animation.channels.single;
+      expect(channel.target, instance);
+      expect(channel.targetName, 'Cube.002');
+      expect(channel.property, AnimationProperty.translation);
+      // The keyframe values landed on the channel's payloads.
+      final (times, values) = _channelData(
+        h.doc,
+        animation,
+        instance,
+        AnimationProperty.translation,
+      );
+      expect(times, [0.0, 1.0]);
+      expect(values.last, [0.0, 1.5, 0.0]);
+    });
+
+    test('two members of one instance get independent channels', () {
+      final h = _harness();
+      _run(h, 'createAnimation', {});
+      final animationId = h.doc.animations.keys.single;
+      final instance = _addCube(h, 'chest0');
+
+      for (final member in ['Cube.001', 'Cube.002']) {
+        _run(h, 'setAnimationKeyframe', {
+          'animationId': animationId.toToken(),
+          'nodeId': instance.toToken(),
+          'targetName': member,
+          'property': 'translation',
+          'time': 0.5,
+          'translation': {'x': 1.0, 'y': 0.0, 'z': 0.0},
+        });
+      }
+
+      final channels = h.doc.animations[animationId]!.channels;
+      expect(channels, hasLength(2));
+      expect(
+        {for (final c in channels) c.targetName},
+        {'Cube.001', 'Cube.002'},
+      );
+      // Both live under the instance; only the name tells them apart.
+      expect(channels.every((c) => c.target == instance), isTrue);
+      // Each carries its own keyframe payload.
+      expect({for (final c in channels) c.timeline}, hasLength(2));
+      expect({for (final c in channels) c.keyframes}, hasLength(2));
+    });
+
+    test('re-keying a member channel preserves ids and interpolation', () {
+      final h = _harness();
+      _run(h, 'createAnimation', {});
+      final animationId = h.doc.animations.keys.single;
+      final instance = _addCube(h, 'chest0');
+      final params = {
+        'animationId': animationId.toToken(),
+        'nodeId': instance.toToken(),
+        'targetName': 'Cube.002',
+        'property': 'rotation',
+      };
+
+      _run(h, 'setAnimationKeyframe', {
+        ...params,
+        'time': 0.0,
+        'rotation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0},
+      });
+      final animation = h.doc.animations[animationId]!;
+      final original = animation.channels.single;
+      expect(original.timeline, isNotNull);
+      expect(original.keyframes, isNotNull);
+
+      // Change the interpolation, then re-key the same member.
+      _run(h, 'setChannelInterpolation', {
+        'animationId': animationId.toToken(),
+        'nodeId': instance.toToken(),
+        'targetName': 'Cube.002',
+        'property': 'rotation',
+        'interpolation': 'cubic',
+      });
+      _run(h, 'setAnimationKeyframe', {
+        ...params,
+        'time': 1.0,
+        'rotation': {'x': 0.0, 'y': 0.7071, 'z': 0.0, 'w': 0.7071},
+      });
+
+      final channels = h.doc.animations[animationId]!.channels;
+      expect(channels, hasLength(1));
+      final rekeyed = channels.single;
+      // Same channel: re-keying rewrote it in place.
+      expect(rekeyed.timeline, original.timeline);
+      expect(rekeyed.keyframes, original.keyframes);
+      expect(rekeyed.interpolation, AnimationInterpolation.cubic);
+      expect(rekeyed.targetName, 'Cube.002');
+    });
+
+    test('keyPose rejects a prefab-internal id with a precise error', () {
+      final h = _harness();
+      _run(h, 'createAnimation', {});
+      final animationId = h.doc.animations.keys.single;
+      final instance = _addCube(h, 'chest0');
+      // A composed member id exists in no document; keyPose cannot resolve it.
+      final fakeMemberId = h.doc.newId();
+
+      expect(
+        () => _run(h, 'keyPose', {
+          'animationId': animationId.toToken(),
+          'time': 0.0,
+          'nodeIds': [fakeMemberId.toToken()],
+        }),
+        throwsA(
+          isA<CommandException>().having(
+            (e) => '$e',
+            'message',
+            allOf(
+              contains('not in the host document'),
+              contains('prefab-internal'),
+              contains('targetName'),
+            ),
+          ),
+        ),
+      );
+      // And the instance was never mis-authored either.
+      expect(h.doc.animations[animationId]!.channels, isEmpty);
+      expect(h.doc.node(instance), isNotNull);
     });
   });
 }

@@ -2,8 +2,15 @@
 part of '../animation_panel.dart';
 
 /// One keyframe position on a timeline lane.
+///
+/// [targetName] is the channel's binding fallback: a prefab member's key
+/// lives on the enclosing instance's channel, so the name — not just the
+/// target id — is what tells two members' keys (and a member's key from the
+/// instance's own) apart. Records compare structurally, so selection,
+/// deletion, and retargeting stay member-exact.
 typedef TimelineKey = ({
   LocalId target,
+  String? targetName,
   AnimationProperty property,
   double time,
 });

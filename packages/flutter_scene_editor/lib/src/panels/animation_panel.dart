@@ -101,14 +101,22 @@ class _AnimationPanelState extends State<AnimationPanel> {
   }
 
   bool _keyExists(
-    ({LocalId target, AnimationProperty property, double time}) key,
+    ({
+      LocalId target,
+      String? targetName,
+      AnimationProperty property,
+      double time,
+    })
+    key,
   ) {
     final id = _controller.previewAnimationId;
     if (id == null) return false;
     final spec = _controller.document.animations[id];
     if (spec == null) return false;
     for (final channel in spec.channels) {
-      if (channel.target != key.target || channel.property != key.property) {
+      if (channel.target != key.target ||
+          channel.targetName != key.targetName ||
+          channel.property != key.property) {
         continue;
       }
       for (final time in channelTimes(_controller.document, channel)) {
@@ -195,50 +203,89 @@ class _AnimationPanelState extends State<AnimationPanel> {
   /// nodes receive keys ([_keyTargetNodes]); each keyed node records the pose
   /// it visibly holds ([_livePoseFor]). No delta math happens here — the
   /// panel only chooses the key-target set and records what is on screen.
+  ///
+  /// A selected prefab member (a node inside an imported instance, which the
+  /// host document does not contain) keys through its enclosing instance:
+  /// the commands address the instance id with the member's name as
+  /// `targetName`, which is what the runtime binder resolves by name at
+  /// playback. The prefab document itself is never touched — instances stay
+  /// linked to their source.
   Future<void> _keySelection(AnimationProperty? property) async {
     final id = _animationId;
     if (id == null) return;
     final time = _controller.previewTime;
     final targets = _keyTargetNodes();
 
-    // Nodes not yet on the timeline get seeded with start/end crystals after
-    // the capture below; nodes already included keep their authored edges
-    // untouched — Key captures only the playhead for them. Computed BEFORE
-    // the capture, which is what puts the fresh nodes on the timeline.
-    final freshNodes = <LocalId>{
-      for (final nodeId in targets)
-        if (_controller.document.nodes.containsKey(nodeId) &&
-            !_nodeHasChannels(nodeId))
-          nodeId,
+    // Resolve every selection into a keyable target up front. A nameless
+    // member cannot be keyed (runtime binding is by name) and is surfaced as
+    // an error rather than silently dropped.
+    final keyTargets = <_KeyTarget>[];
+    for (final nodeId in targets) {
+      final origin = _controller.memberOrigin(nodeId);
+      if (origin == null) {
+        // Plain nodes keep the current shape exactly; ids missing from the
+        // document (a deleted node) are skipped as before.
+        if (!_controller.document.nodes.containsKey(nodeId)) continue;
+        keyTargets.add((node: nodeId, commandTarget: nodeId, targetName: null));
+        continue;
+      }
+      final memberName = _controller.displayNode(nodeId)?.name;
+      if (memberName == null || memberName.isEmpty) {
+        _showError(
+          StateError(
+            'Cannot key ${nodeId.toToken()}: prefab members are animated by '
+            'name, and this member has no name. Rename it in the Inspector '
+            'first.',
+          ),
+        );
+        continue;
+      }
+      keyTargets.add((
+        node: nodeId,
+        commandTarget: origin.instanceId,
+        targetName: memberName,
+      ));
+    }
+
+    // Targets not yet on the timeline get seeded with start/end crystals
+    // after the capture below; targets already included keep their authored
+    // edges untouched — Key captures only the playhead for them. Computed
+    // BEFORE the capture, which is what puts the fresh targets on the
+    // timeline.
+    final freshTargets = <_KeyTarget>{
+      for (final target in keyTargets)
+        if (!_nodeIsKeyed(target)) target,
     };
 
     final commands = <(String, Map<String, Object?>)>[
-      for (final nodeId in targets)
-        if (_controller.document.nodes.containsKey(nodeId))
-          for (final p
-              in property == null
-                  ? const [
-                      AnimationProperty.translation,
-                      AnimationProperty.rotation,
-                      AnimationProperty.scale,
-                    ]
-                  : [property])
-            (
-              'setAnimationKeyframe',
-              {
-                'animationId': id.toToken(),
-                'nodeId': nodeId.toToken(),
-                'property': p.name,
-                'time': time,
-                // Capture the pose the user actually sees. A pose landed with
-                // the viewport gizmo or an inspector drag lives on the live
-                // node, not the document; keying without values would make the
-                // command re-read a stale document pose and snap the node back
-                // to it. Recording the visible pose here keeps the authored
-                // rest pose (the model's origin) untouched.
-                ...?_livePoseFor(nodeId, p),
-              },
-            ),
+      for (final target in keyTargets)
+        for (final p
+            in property == null
+                ? const [
+                    AnimationProperty.translation,
+                    AnimationProperty.rotation,
+                    AnimationProperty.scale,
+                  ]
+                : [property])
+          (
+            'setAnimationKeyframe',
+            {
+              'animationId': id.toToken(),
+              'nodeId': target.commandTarget.toToken(),
+              if (target.targetName != null) 'targetName': target.targetName,
+              'property': p.name,
+              'time': time,
+              // Capture the pose the user actually sees. A pose landed with
+              // the viewport gizmo or an inspector drag lives on the live
+              // node, not the document; keying without values would make the
+              // command re-read a stale document pose and snap the node back
+              // to it. Recording the visible pose here keeps the authored
+              // rest pose (the model's origin) untouched. For a member, the
+              // live member node is resolved through the live instance the
+              // same way the preview and runtime binders do.
+              ...?_livePoseFor(target.node, p, targetName: target.targetName),
+            },
+          ),
     ];
     try {
       await _controller.runAll(commands);
@@ -246,15 +293,26 @@ class _AnimationPanelState extends State<AnimationPanel> {
       _showError(error);
       return;
     }
-    if (property == null) await _ensureEdgeKeys(id, time, freshNodes);
+    if (property == null) await _ensureEdgeKeys(id, time, freshTargets);
   }
 
-  /// Whether [nodeId] drives any channel of the current animation — i.e. its
-  /// header already appears on the timeline.
-  bool _nodeHasChannels(LocalId nodeId) {
+  /// Whether [target] already drives any channel of the current animation —
+  /// i.e. its header already appears on the timeline.
+  ///
+  /// A member's channels are stored under the enclosing instance's id with
+  /// the member's name as `targetName`, so member targets discriminate by
+  /// name; plain targets match by id alone.
+  bool _nodeIsKeyed(_KeyTarget target) {
     final spec = _animation;
     if (spec == null) return false;
-    return spec.channels.any((c) => c.target == nodeId);
+    if (target.targetName == null) {
+      return spec.channels.any((c) => c.target == target.node);
+    }
+    return spec.channels.any(
+      (c) =>
+          c.target == target.commandTarget &&
+          (c.targetName ?? '') == target.targetName,
+    );
   }
 
   /// The nodes a multi-node key applies to, per [_movementMode].
@@ -267,12 +325,12 @@ class _AnimationPanelState extends State<AnimationPanel> {
   /// child's own channel pins it in place.
   ///
   /// [MultiNodeMovementMode.mirrored] keys every selected node individually,
-  /// including selected descendants of other selected nodes. Callers filter
-  /// out ids missing from the document (prefab members), so the raw
-  /// selection is returned as-is.
+  /// including selected descendants of other selected nodes. The raw selection
+  /// is returned as-is; [_keySelection] resolves prefab members through their
+  /// enclosing instance (and surfaces unkeyable ones) from here.
   List<LocalId> _keyTargetNodes() =>
       _movementMode == MultiNodeMovementMode.inherited
-      ? _controller.topLevelSelection()
+      ? _controller.topLevelSelectionInDisplay()
       : _controller.selection.ids.toList();
 
   /// Seeds the start and end crystals for nodes that just joined the timeline:
@@ -287,7 +345,7 @@ class _AnimationPanelState extends State<AnimationPanel> {
   Future<void> _ensureEdgeKeys(
     LocalId id,
     double playhead,
-    Set<LocalId> freshNodes,
+    Set<_KeyTarget> freshTargets,
   ) async {
     final spec = _controller.document.animations[id];
     if (spec == null) return;
@@ -302,7 +360,7 @@ class _AnimationPanelState extends State<AnimationPanel> {
     if (end <= 1e-4) end = 1.0;
     final edges = {0.0, end};
     final commands = <(String, Map<String, Object?>)>[];
-    for (final nodeId in freshNodes) {
+    for (final target in freshTargets) {
       for (final property in const [
         AnimationProperty.translation,
         AnimationProperty.rotation,
@@ -310,7 +368,7 @@ class _AnimationPanelState extends State<AnimationPanel> {
       ]) {
         for (final edge in edges) {
           // An edge under the playhead was already captured above. Every
-          // other edge of a fresh node records the pose it currently shows:
+          // other edge of a fresh target records the pose it currently shows:
           // with no curve of its own, that visible pose is what plays
           // everywhere, so seeding it at the clip's ends is exact.
           if ((edge - playhead).abs() <= 1e-3) continue;
@@ -318,10 +376,18 @@ class _AnimationPanelState extends State<AnimationPanel> {
             'setAnimationKeyframe',
             {
               'animationId': id.toToken(),
-              'nodeId': nodeId.toToken(),
+              // Members seed against the enclosing instance (a real host
+              // node) with the member's name as the binding fallback, the
+              // same shape the playhead capture uses.
+              'nodeId': target.commandTarget.toToken(),
+              if (target.targetName != null) 'targetName': target.targetName,
               'property': property.name,
               'time': edge,
-              ...?_livePoseFor(nodeId, property),
+              ...?_livePoseFor(
+                target.node,
+                property,
+                targetName: target.targetName,
+              ),
             },
           ));
         }
@@ -393,6 +459,7 @@ class _AnimationPanelState extends State<AnimationPanel> {
         await _controller.run('removeAnimationKeyframe', {
           'animationId': id.toToken(),
           'nodeId': key.target.toToken(),
+          if (key.targetName != null) 'targetName': key.targetName,
           'property': key.property.name,
           'time': key.time,
         });
@@ -417,6 +484,7 @@ class _AnimationPanelState extends State<AnimationPanel> {
         await _controller.run('moveAnimationKeyframe', {
           'animationId': id.toToken(),
           'nodeId': key.target.toToken(),
+          if (key.targetName != null) 'targetName': key.targetName,
           'property': key.property.name,
           'fromTime': key.time,
           'toTime': clamped,
@@ -943,9 +1011,9 @@ class _AnimationPanelState extends State<AnimationPanel> {
               child: Text(
                 _selectedKeys.length > 1
                     ? '${_selectedKeys.length} keys selected'
-                    : '${_nodeName(_primaryKey!.target)} · '
-                      '${_primaryKey!.property.name} @ '
-                      '${_primaryKey!.time.toStringAsFixed(2)}s',
+                    : '${_keyLabel(_primaryKey!)} · '
+                          '${_primaryKey!.property.name} @ '
+                          '${_primaryKey!.time.toStringAsFixed(2)}s',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.bodySmall,
@@ -1022,7 +1090,9 @@ class _AnimationPanelState extends State<AnimationPanel> {
     final id = _animationId;
     if (key == null || id == null) return null;
     for (final channel in _controller.document.animations[id]!.channels) {
-      if (channel.target == key.target && channel.property == key.property) {
+      if (channel.target == key.target &&
+          channel.targetName == key.targetName &&
+          channel.property == key.property) {
         return channel;
       }
     }
@@ -1032,9 +1102,14 @@ class _AnimationPanelState extends State<AnimationPanel> {
   Future<void> _setChannelInterpolation(String mode) async {
     final key = _primaryKey;
     if (key == null) return;
+    // The selected key's channel carries the binding fallback; passing it
+    // keeps a member channel (stored under the instance id with a targetName)
+    // from matching the instance's own channel instead.
+    final channel = _channelOfSelectedKey;
     await _controller.run('setChannelInterpolation', {
       'animationId': _animationId?.toToken(),
       'nodeId': key.target.toToken(),
+      if (channel?.targetName != null) 'targetName': channel!.targetName,
       'property': key.property.name,
       'interpolation': mode,
     });
@@ -1042,7 +1117,27 @@ class _AnimationPanelState extends State<AnimationPanel> {
 
   String _nodeName(LocalId id) =>
       _controller.document.nodes[id]?.name ?? id.toToken();
+
+  /// The display label for a selected key: a member key is labeled with the
+  /// member's name (the binding it drives), a plain key with the node's name.
+  String _keyLabel(TimelineKey key) {
+    if (key.targetName != null) return key.targetName!;
+    return _nodeName(key.target);
+  }
 }
+
+/// One node the Key button captures, resolved from the selection.
+///
+/// [node] is what was selected — a host-document node, or a composed prefab
+/// member id. [commandTarget] is the host-document node the key commands
+/// address: the node itself for plain nodes, the enclosing instance for a
+/// member (which carries the channel, with [targetName] naming the member the
+/// runtime binder resolves inside it; null for plain nodes).
+typedef _KeyTarget = ({
+  LocalId node,
+  LocalId commandTarget,
+  String? targetName,
+});
 
 /// How a multi-node key applies to the selection in the animation panel.
 enum MultiNodeMovementMode {

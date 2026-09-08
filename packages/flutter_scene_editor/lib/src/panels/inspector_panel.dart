@@ -22,7 +22,56 @@ import '../inspector/reference_picker.dart';
 import '../inspector/resource_origin.dart';
 import '../inspector/stage_section.dart';
 import '../io/scene_io.dart';
+import '../shell/editor_dialog.dart';
 import '../shell/editor_theme.dart';
+
+/// Commits a name rename for [nodes], warning first when the rename would
+/// stale animation channels: a keyed prefab member is animated by name (the
+/// channel lives on the enclosing instance with the member's name as
+/// `targetName`), so renaming it leaves those channels unbound. They surface
+/// in the timeline as an unbound row; the dialog makes that cost explicit
+/// instead of letting the rename silently detach the animation.
+Future<void> _renameNodes(
+  BuildContext context,
+  EditorController controller,
+  List<NodeSpec> nodes,
+  String name,
+) async {
+  final staling = [
+    for (final n in nodes)
+      if (name != n.name && controller.renameStalesAnimationChannels(n.id)) n,
+  ];
+  if (staling.isNotEmpty && context.mounted) {
+    final proceed = await showEditorDialog<bool>(
+      context,
+      builder: (context) => AlertDialog(
+        title: const Text('Rename animated member?'),
+        content: Text(
+          '${staling.map((n) => n.name).join(', ')} '
+          '${staling.length == 1 ? 'is' : 'are'} keyed on the timeline by '
+          'name. Renaming ${staling.length == 1 ? 'it' : 'them'} leaves '
+          '${staling.length == 1 ? 'that channel' : 'those channels'} '
+          'unbound — it shows as an unbound row in the timeline until it is '
+          're-keyed or the member is renamed back.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.tonal(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Rename'),
+          ),
+        ],
+      ),
+    );
+    if (proceed != true) return;
+  }
+  for (final n in nodes) {
+    controller.setNodeNameRouted(n.id, name);
+  }
+}
 
 /// Property inspector for the primary selected node.
 ///
@@ -142,16 +191,14 @@ class _NodeInspector extends StatelessWidget {
           EditorSectionHeader(
             label: single ? 'Node' : 'Node (${nodes.length} selected)',
           ),
-          // Name field.
+          // Name field. A keyed prefab member is animated by name, so
+          // renaming it stales its channels — confirm before committing.
           _StringRow(
             label: 'Name',
             value: node.name,
             mixed: !uniformName,
-            onSubmit: (v) {
-              for (final n in nodes) {
-                controller.setNodeNameRouted(n.id, v);
-              }
-            },
+            onSubmit: (v) =>
+                unawaited(_renameNodes(context, controller, nodes, v)),
           ),
           // Visibility toggle.
           _BoolRow(

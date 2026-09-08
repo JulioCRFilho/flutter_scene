@@ -48,6 +48,42 @@ import 'animation_preview_intent.dart';
 import 'animation_sampling.dart';
 import 'animation_target_resolution.dart';
 
+/// The selected ids with no selected ancestor, ordered depth-first over
+/// [graph] (roots first, document order).
+///
+/// Pure so it is testable headlessly. The document the walk runs over
+/// decides whether prefab members are visible: the host document does not
+/// contain them, so keying walks the display (composed) document — walking
+/// the host one would silently drop every selected member from the result
+/// even though they are selected.
+List<LocalId> topLevelSelectionOver(SceneQuery graph, Set<LocalId> selected) {
+  bool hasSelectedAncestor(LocalId id) {
+    var parent = graph.parentOf(id);
+    while (parent != null) {
+      if (selected.contains(parent)) return true;
+      parent = graph.parentOf(parent);
+    }
+    return false;
+  }
+
+  final tops = {
+    for (final id in selected)
+      if (!hasSelectedAncestor(id)) id,
+  };
+  final ordered = <LocalId>[];
+  void visit(LocalId id) {
+    if (tops.contains(id)) ordered.add(id);
+    for (final child in graph.childrenOf(id)) {
+      visit(child.id);
+    }
+  }
+
+  for (final root in graph.roots) {
+    visit(root.id);
+  }
+  return ordered;
+}
+
 /// Reflects an [EditorSession] into a live [Scene] and back.
 class EditorController extends ChangeNotifier
     implements AnimationPreviewTarget {
@@ -1035,35 +1071,27 @@ class EditorController extends ChangeNotifier
   /// The selected nodes with no selected ancestor, in document order. Copy,
   /// duplicate, and delete act on these so a parent and its descendant are not
   /// processed twice.
-  List<LocalId> topLevelSelection() {
-    final selected = selection.ids;
-    bool hasSelectedAncestor(LocalId id) {
-      var parent = query.parentOf(id);
-      while (parent != null) {
-        if (selected.contains(parent)) return true;
-        parent = query.parentOf(parent);
-      }
-      return false;
-    }
+  ///
+  /// The walk runs over [graph] — the host document by default. Pass
+  /// [displayQuery] to walk the composed document instead, which is what
+  /// keying needs: prefab members exist only there, so a host-document walk
+  /// would silently drop every selected member.
+  List<LocalId> topLevelSelection({SceneQuery? graph}) =>
+      topLevelSelectionOver(graph ?? query, selection.ids);
 
-    final tops = {
-      for (final id in selected)
-        if (!hasSelectedAncestor(id)) id,
-    };
-    // Document order (roots first, depth-first) for stable, predictable output.
-    final ordered = <LocalId>[];
-    void visit(LocalId id) {
-      if (tops.contains(id)) ordered.add(id);
-      for (final child in query.childrenOf(id)) {
-        visit(child.id);
-      }
-    }
+  /// [topLevelSelection] over the display (composed) document.
+  ///
+  /// Keying uses this: the outliner renders the composed document, so a
+  /// selected prefab member only orders and resolves here. A member selected
+  /// together with its enclosing instance is covered by the instance's own
+  /// key (the instance is its ancestor in the composed tree).
+  List<LocalId> topLevelSelectionInDisplay() =>
+      topLevelSelection(graph: displayQuery);
 
-    for (final root in query.roots) {
-      visit(root.id);
-    }
-    return ordered;
-  }
+  /// Read queries over the display (composed) document — the tree the
+  /// outliner draws and the keying path walks. Cheap to build (no state);
+  /// recomposed views come out of [displayDocument] directly.
+  SceneQuery get displayQuery => SceneQuery(displayDocument);
 
   /// Captures the top-level selected subtrees into the clipboard. Does nothing
   /// when the selection is empty.
@@ -1244,6 +1272,26 @@ class EditorController extends ChangeNotifier
       return _override(memberOrigin(id)!, 'name', name);
     }
     return run('setNodeName', {'nodeId': id.toToken(), 'name': name});
+  }
+
+  /// Whether renaming [id] would stale animation channels.
+  ///
+  /// Prefab members are animated by name: a keyed member's channels live on
+  /// the enclosing instance with the member's current name as `targetName`,
+  /// and the runtime binder resolves that name at playback. Renaming the
+  /// member (an override) leaves those channels unbound — they surface in
+  /// the timeline as an unbound row rather than silently driving nothing.
+  /// Callers warn before committing such a rename.
+  bool renameStalesAnimationChannels(LocalId id) {
+    final origin = memberOrigin(id);
+    if (origin == null) return false;
+    final name = displayNode(id)?.name;
+    if (name == null || name.isEmpty) return false;
+    return document.animations.values.any(
+      (animation) => animation.channels.any(
+        (c) => c.target == origin.instanceId && (c.targetName ?? '') == name,
+      ),
+    );
   }
 
   /// Sets node [id]'s visibility (an override when [id] is prefab content).

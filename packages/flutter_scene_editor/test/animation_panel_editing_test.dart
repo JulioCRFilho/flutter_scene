@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_scene/scene.dart';
 import 'package:flutter_scene_editor/flutter_scene_editor.dart';
@@ -161,10 +163,11 @@ void main() {
 
     final channel = channelOf(controller, animationId, nodeId, 'translation')!;
     final times2 = channelTimes(controller.document, channel);
-    expect(
-      times2.map((t) => (t * 100).roundToDouble() / 100),
-      [0.25, 0.5, 1.0],
-    );
+    expect(times2.map((t) => (t * 100).roundToDouble() / 100), [
+      0.25,
+      0.5,
+      1.0,
+    ]);
     final bytes = controller.document.payload(channel.keyframes)!.bytes!;
     final values = bytes.buffer.asFloat32List(
       bytes.offsetInBytes,
@@ -195,10 +198,7 @@ void main() {
       nodeId,
       'translation',
     )!;
-    expect(
-      channelTimes(controller.document, translation),
-      [0.0, 1.0],
-    );
+    expect(channelTimes(controller.document, translation), [0.0, 1.0]);
 
     // The same 1s span opens on rotation and scale.
     for (final property in ['rotation', 'scale']) {
@@ -329,132 +329,279 @@ void main() {
   );
 
   testWidgets(
-  "a node joining the timeline is seeded at the clip's edges with its "
-  'visible pose',
-  (tester) async {
-    // Two-node document: Alpha already animates; Bravo joins later.
-    final document = SceneDocument();
-    final nodeA = document.newId();
-    final nodeB = document.newId();
-    document.addNode(NodeSpec(id: nodeA, name: 'Alpha'), root: true);
-    document.addNode(NodeSpec(id: nodeB, name: 'Bravo'), root: true);
-    final session = EditorSession(document);
-    final controller = await EditorController.open(session);
-    addTearDown(controller.dispose);
-    await controller.run('createAnimation', {});
-    final animationId = document.animations.keys.single;
+    "a node joining the timeline is seeded at the clip's edges with its "
+    'visible pose',
+    (tester) async {
+      // Two-node document: Alpha already animates; Bravo joins later.
+      final document = SceneDocument();
+      final nodeA = document.newId();
+      final nodeB = document.newId();
+      document.addNode(NodeSpec(id: nodeA, name: 'Alpha'), root: true);
+      document.addNode(NodeSpec(id: nodeB, name: 'Bravo'), root: true);
+      final session = EditorSession(document);
+      final controller = await EditorController.open(session);
+      addTearDown(controller.dispose);
+      await controller.run('createAnimation', {});
+      final animationId = document.animations.keys.single;
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: SizedBox(
-            width: 600,
-            height: 320,
-            child: AnimationPanel(controller: controller),
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 600,
+              height: 320,
+              child: AnimationPanel(controller: controller),
+            ),
           ),
         ),
-      ),
-    );
-    await tester.pump();
+      );
+      await tester.pump();
 
-    // Alpha already carries a clip ending at 2s.
-    await key(controller, animationId, nodeA, 'translation', 2.0);
+      // Alpha already carries a clip ending at 2s.
+      await key(controller, animationId, nodeA, 'translation', 2.0);
 
-    // Select the fresh node, pose it the way a gizmo drag does (live node
-    // only), scrub mid-clip and press Key.
-    controller.selection.selectOnly(nodeB);
-    controller.seekPreview(1.0);
-    controller.liveNode(nodeB)!.position = Vector3(0, 7, 0);
-    await tester.pump();
-    await tester.tap(find.text('Key'));
-    await tester.pumpAndSettle();
+      // Select the fresh node, pose it the way a gizmo drag does (live node
+      // only), scrub mid-clip and press Key.
+      controller.selection.selectOnly(nodeB);
+      controller.seekPreview(1.0);
+      controller.liveNode(nodeB)!.position = Vector3(0, 7, 0);
+      await tester.pump();
+      await tester.tap(find.text('Key'));
+      await tester.pumpAndSettle();
 
-    // Bravo was not on the timeline, so it is seeded at the clip's edges:
-    // crystals at t=0 and the clip's end (2s), plus the playhead capture —
-    // all rows carrying the visible pose (y=7), never the document origin.
-    final channel = channelOf(
-      controller,
-      animationId,
-      nodeB,
-      'translation',
-    )!;
-    final times = channelTimes(controller.document, channel);
-    expect(
-      times.map((t) => (t * 100).roundToDouble() / 100),
-      [0.0, 1.0, 2.0],
-    );
-    final bytes = controller.document.payload(channel.keyframes)!.bytes!;
-    final values = bytes.buffer.asFloat32List(
-      bytes.offsetInBytes,
-      bytes.lengthInBytes ~/ 4,
-    );
-    for (var i = 0; i < times.length; i++) {
-      expect(values[i * 3 + 1], closeTo(7.0, 1e-4));
-    }
+      // Bravo was not on the timeline, so it is seeded at the clip's edges:
+      // crystals at t=0 and the clip's end (2s), plus the playhead capture —
+      // all rows carrying the visible pose (y=7), never the document origin.
+      final channel = channelOf(controller, animationId, nodeB, 'translation')!;
+      final times = channelTimes(controller.document, channel);
+      expect(times.map((t) => (t * 100).roundToDouble() / 100), [
+        0.0,
+        1.0,
+        2.0,
+      ]);
+      final bytes = controller.document.payload(channel.keyframes)!.bytes!;
+      final values = bytes.buffer.asFloat32List(
+        bytes.offsetInBytes,
+        bytes.lengthInBytes ~/ 4,
+      );
+      for (var i = 0; i < times.length; i++) {
+        expect(values[i * 3 + 1], closeTo(7.0, 1e-4));
+      }
 
-    // And Alpha's existing clip is untouched.
-    final alphaChannel = channelOf(
-      controller,
-      animationId,
-      nodeA,
-      'translation',
-    )!;
-    expect(channelTimes(controller.document, alphaChannel), [2.0]);
-  },
-);
+      // And Alpha's existing clip is untouched.
+      final alphaChannel = channelOf(
+        controller,
+        animationId,
+        nodeA,
+        'translation',
+      )!;
+      expect(channelTimes(controller.document, alphaChannel), [2.0]);
+    },
+  );
 
-testWidgets(
-  'nodes hold their first-added position while channels are edited',
-  (tester) async {
-    // Two-node document; Alpha is keyed first, then Bravo.
-    final document = SceneDocument();
-    final nodeA = document.newId();
-    final nodeB = document.newId();
-    document.addNode(NodeSpec(id: nodeA, name: 'Alpha'), root: true);
-    document.addNode(NodeSpec(id: nodeB, name: 'Bravo'), root: true);
-    final session = EditorSession(document);
-    final controller = await EditorController.open(session);
-    addTearDown(controller.dispose);
-    await controller.run('createAnimation', {});
-    final animationId = document.animations.keys.single;
+  testWidgets(
+    'nodes hold their first-added position while channels are edited',
+    (tester) async {
+      // Two-node document; Alpha is keyed first, then Bravo.
+      final document = SceneDocument();
+      final nodeA = document.newId();
+      final nodeB = document.newId();
+      document.addNode(NodeSpec(id: nodeA, name: 'Alpha'), root: true);
+      document.addNode(NodeSpec(id: nodeB, name: 'Bravo'), root: true);
+      final session = EditorSession(document);
+      final controller = await EditorController.open(session);
+      addTearDown(controller.dispose);
+      await controller.run('createAnimation', {});
+      final animationId = document.animations.keys.single;
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: SizedBox(
-            width: 600,
-            height: 320,
-            child: AnimationPanel(controller: controller),
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 600,
+              height: 320,
+              child: AnimationPanel(controller: controller),
+            ),
           ),
         ),
-      ),
-    );
-    await tester.pump();
+      );
+      await tester.pump();
 
-    // Alpha joins the timeline first, then Bravo — that order stays.
-    await key(controller, animationId, nodeA, 'translation', 0.0);
-    await key(controller, animationId, nodeB, 'translation', 0.0);
-    await tester.pump();
-    expect(
-      painterRowTitles(tester),
-      ['Alpha', 'translation', 'Bravo', 'translation'],
-    );
+      // Alpha joins the timeline first, then Bravo — that order stays.
+      await key(controller, animationId, nodeA, 'translation', 0.0);
+      await key(controller, animationId, nodeB, 'translation', 0.0);
+      await tester.pump();
+      expect(painterRowTitles(tester), [
+        'Alpha',
+        'translation',
+        'Bravo',
+        'translation',
+      ]);
 
-    // Re-keying Alpha rewrites its existing channel without demoting it.
-    await key(controller, animationId, nodeA, 'translation', 1.0);
-    await tester.pump();
-    expect(
-      painterRowTitles(tester),
-      ['Alpha', 'translation', 'Bravo', 'translation'],
-    );
+      // Re-keying Alpha rewrites its existing channel without demoting it.
+      await key(controller, animationId, nodeA, 'translation', 1.0);
+      await tester.pump();
+      expect(painterRowTitles(tester), [
+        'Alpha',
+        'translation',
+        'Bravo',
+        'translation',
+      ]);
 
-    // A brand-new channel for Alpha (rotation) lands under Alpha's block.
-    await key(controller, animationId, nodeA, 'rotation', 1.0);
-    await tester.pump();
-   expect(
-      painterRowTitles(tester),
-      ['Alpha', 'translation', 'rotation', 'Bravo', 'translation'],
-   );
-  },
-);
+      // A brand-new channel for Alpha (rotation) lands under Alpha's block.
+      await key(controller, animationId, nodeA, 'rotation', 1.0);
+      await tester.pump();
+      expect(painterRowTitles(tester), [
+        'Alpha',
+        'translation',
+        'rotation',
+        'Bravo',
+        'translation',
+      ]);
+    },
+  );
+
+  testWidgets(
+    'Key routes a selected prefab member through its enclosing instance',
+    (tester) async {
+      await Scene.initializeStaticResources();
+      // A chest prefab with two lid members, written to disk so the instance
+      // resolves it the way a linked .fscene (or imported .glb) does.
+      final prefab = SceneDocument();
+      final chest = prefab.createNode(name: 'chest', root: true);
+      final lidA = prefab.createNode(name: 'Cube.001');
+      final lidB = prefab.createNode(name: 'Cube.002');
+      chest.children.addAll([lidA.id, lidB.id]);
+      final tempDir = await Directory.systemTemp.createTemp(
+        'fscene_member_key',
+      );
+      addTearDown(tempDir.delete);
+      final prefabFile = File(
+        '${tempDir.path}${Platform.pathSeparator}chest.fscene',
+      );
+      await prefabFile.writeAsString(writeFscene(prefab));
+
+      final document = SceneDocument();
+      final instance = document.createNode(name: 'chest0', root: true);
+      instance.instance = PrefabInstanceSpec(source: AssetRef(prefabFile.path));
+      final session = EditorSession(document);
+      final controller = await EditorController.open(
+        session,
+        baseDirectory: tempDir.path,
+      );
+      addTearDown(controller.dispose);
+      await controller.run('createAnimation', {});
+      final animationId = document.animations.keys.single;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 600,
+              height: 320,
+              child: AnimationPanel(controller: controller),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      LocalId memberId(String name) => controller.displayDocument.nodes.values
+          .firstWhere((n) => controller.isPrefabMember(n.id) && n.name == name)
+          .id;
+
+      // Select a composed lid the way the Outliner does (a member id that
+      // only exists in the composed document), pose it live, and press Key.
+      final memberA = memberId('Cube.001');
+      controller.selection.selectOnly(memberA);
+      controller.seekPreview(1.0);
+      controller.liveNode(memberA)!.position = Vector3(0, 7, 0);
+      await tester.pump();
+      await tester.tap(find.text('Key'));
+      await tester.pumpAndSettle();
+
+      // The channels are authored against the INSTANCE (a real host node)
+      // with the member's name as targetName — not against the member id,
+      // which the host document does not contain.
+      final channels = document.animations[animationId]!.channels;
+      expect(channels, hasLength(3)); // translation, rotation, scale
+      expect(channels.every((c) => c.target == instance.id), isTrue);
+      expect(channels.every((c) => c.targetName == 'Cube.001'), isTrue);
+
+      // The lid joins the timeline seeded at its edges, and every key records
+      // the visible pose (y=7), never the document origin. The playhead edge
+      // (1s) was captured above; t=0 is the seeded edge.
+      final translationA = channels.firstWhere(
+        (c) => c.property == AnimationProperty.translation,
+      );
+      final timesA = channelTimes(document, translationA);
+      expect(timesA.map((t) => (t * 100).roundToDouble() / 100), [0.0, 1.0]);
+      final bytes = document.payload(translationA.keyframes)!.bytes!;
+      final values = bytes.buffer.asFloat32List(
+        bytes.offsetInBytes,
+        bytes.lengthInBytes ~/ 4,
+      );
+      for (var i = 0; i < timesA.length; i++) {
+        expect(values[i * 3 + 1], closeTo(7.0, 1e-4));
+      }
+
+      // A second member of the SAME instance keys independently: its own
+      // channels under its own name.
+      final memberB = memberId('Cube.002');
+      controller.selection.selectOnly(memberB);
+      controller.seekPreview(0.5);
+      controller.liveNode(memberB)!.position = Vector3(0, 9, 0);
+      await tester.pump();
+      await tester.tap(find.text('Key'));
+      await tester.pumpAndSettle();
+
+      final allChannels = document.animations[animationId]!.channels;
+      final memberBChannels = allChannels
+          .where((c) => c.targetName == 'Cube.002')
+          .toList();
+      expect(memberBChannels, hasLength(3));
+      expect(memberBChannels.every((c) => c.target == instance.id), isTrue);
+
+      // Each node holds its own timeline block, in keying order — two
+      // members of one instance never share a block.
+      expect(painterRowTitles(tester), [
+        'Cube.001',
+        'translation',
+        'rotation',
+        'scale',
+        'Cube.002',
+        'translation',
+        'rotation',
+        'scale',
+      ]);
+
+      // Re-keying Cube.002 must not re-seed its edges: the member registers
+      // as already on the timeline (member-aware channel lookup).
+      controller.seekPreview(0.25);
+      await tester.pump();
+      await tester.tap(find.text('Key'));
+      await tester.pumpAndSettle();
+      AnimationChannelSpec translationOf(String name) =>
+          document.animations[animationId]!.channels.firstWhere(
+            (c) =>
+                c.targetName == name &&
+                c.property == AnimationProperty.translation,
+          );
+      expect(
+        channelTimes(
+          document,
+          translationOf('Cube.002'),
+        ).map((t) => (t * 100).roundToDouble() / 100),
+        [0.0, 0.25, 0.5, 1.0],
+      );
+      // And Cube.001's channels are untouched by the second member's keys.
+      expect(
+        channelTimes(
+          document,
+          translationA,
+        ).map((t) => (t * 100).roundToDouble() / 100),
+        [0.0, 1.0],
+      );
+    },
+  );
 }

@@ -91,24 +91,63 @@ class _AnimationTimelineState extends State<AnimationTimeline> {
   /// (e.g., after deleting the last keyframe) so the timeline doesn't jump.
   double? _previousDuration;
 
+  /// The label for a node group's header row.
+  ///
+  /// A channel authored against a prefab member stores the enclosing
+  /// instance as its target id and the member's name as `targetName`, so the
+  /// binding name — not the instance node's own document name — is what the
+  /// header must show ("Cube.002", not the chest instance). Plain-node
+  /// channels store the node's own name as the fallback, so preferring a
+  /// `targetName` that differs from the node name changes nothing for them.
+  ///
+  /// When that binding name no longer resolves on the live graph (the member
+  /// was renamed after keying — runtime binding is by name), the row is
+  /// flagged unbound rather than silently playing nothing.
+  String _headerTitle(
+    SceneDocument document,
+    List<AnimationChannelSpec> channels,
+  ) {
+    final first = channels.first;
+    final nodeTitle = document.nodes[first.target]?.name ?? 'node';
+    final bindingName = first.targetName;
+    if (bindingName == null || bindingName == nodeTitle) return nodeTitle;
+    final live = controller.liveNode(first.target);
+    final bound =
+        live == null || resolveChannelTarget(live, bindingName) != null;
+    return bound ? bindingName : '$bindingName · unbound';
+  }
+
   EditorController get controller => widget.controller;
   AnimationSpec get animation => widget.animation;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final document = controller.document;
     // One header row per animated node followed by that node's property
     // lanes, keeping each node's first-appearance order: a multi-node
     // animation reads as distinct blocks rather than interleaved channels.
-    final nodeOrder = <LocalId>[];
-    final channelIndexesByNode = <LocalId, List<int>>{};
+    //
+    // The group key is member-aware: a channel authored against a prefab
+    // member (the enclosing instance as target id, the member's name as
+    // targetName) groups under that member — so two members of one chest
+    // instance (and the instance itself) each get their own block, exactly
+    // like separate plain nodes.
+    final document = controller.document;
+    String groupKeyOf(AnimationChannelSpec channel) {
+      final nodeName = document.nodes[channel.target]?.name;
+      return channel.targetName != null && channel.targetName != nodeName
+          ? '${channel.target.toToken()}\u0000${channel.targetName}'
+          : channel.target.toToken();
+    }
+
+    final nodeOrder = <String>[];
+    final channelIndexesByNode = <String, List<int>>{};
     for (var i = 0; i < animation.channels.length; i++) {
-      final target = animation.channels[i].target;
-      final bucket = channelIndexesByNode[target];
+      final key = groupKeyOf(animation.channels[i]);
+      final bucket = channelIndexesByNode[key];
       if (bucket == null) {
-        channelIndexesByNode[target] = [i];
-        nodeOrder.add(target);
+        channelIndexesByNode[key] = [i];
+        nodeOrder.add(key);
       } else {
         bucket.add(i);
       }
@@ -133,7 +172,9 @@ class _AnimationTimelineState extends State<AnimationTimeline> {
       for (final node in nodeOrder) ...[
         (
           isHeader: true,
-          title: document.nodes[node]?.name ?? 'node',
+          title: _headerTitle(document, [
+            for (final i in channelIndexesByNode[node]!) animation.channels[i],
+          ]),
           times: null,
           channel: null,
           groupChannels: [
@@ -327,6 +368,7 @@ class _AnimationTimelineState extends State<AnimationTimeline> {
             nearestDistance = distance;
             nearest = (
               target: channel.target,
+              targetName: channel.targetName,
               property: channel.property,
               time: time,
             );
@@ -464,6 +506,7 @@ class _AnimationTimelineState extends State<AnimationTimeline> {
                                       for (final key in _dragOrigins!)
                                         (
                                           target: key.target,
+                                          targetName: key.targetName,
                                           property: key.property,
                                           time: key.time + _dragOffset,
                                         ),

@@ -76,7 +76,20 @@ engine.Animation? buildAnimation(
   for (final channel in spec.channels) {
     final times = _floats(document.payload(channel.timeline)).toList();
     final values = _floats(document.payload(channel.keyframes));
-    final name = nodes[channel.target]?.name ?? channel.targetName ?? '';
+    // A channel authored against a prefab member (see
+    // setAnimationKeyframe's targetName) stores the enclosing instance as its
+    // target id and the member's name as the binding fallback. Composition
+    // remaps that id to the instance node, whose own name is NOT the member
+    // the channel drives — so when targetName disagrees with the target
+    // node's own name, targetName is authoritative (the runtime binder and
+    // the editor preview resolve by that name). Plain-node channels store the
+    // node's own name as the fallback, so they keep binding by id-derived
+    // name and survive a plain rename between authoring and playback.
+    final targetNode = nodes[channel.target];
+    final name =
+        channel.targetName != null && channel.targetName != targetNode?.name
+        ? channel.targetName!
+        : targetNode?.name ?? channel.targetName ?? '';
 
     final engine.AnimationProperty property;
     final engine.PropertyResolver resolver;
