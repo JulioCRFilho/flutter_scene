@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_scene/scene.dart' show Scene;
+import 'package:flutter_scene_editor_core/flutter_scene_editor_core.dart';
 import 'package:forui/forui.dart';
 
 import '../controller/editor_controller.dart';
@@ -588,7 +589,14 @@ class _EditorShellState extends State<EditorShell> with WidgetsBindingObserver {
   Future<void> _reimportGlb() async {
     final ids = _ctrl.selection.ids;
     if (ids.length != 1) return;
-    final record = linkedImportRecordFor(_ctrl, ids.first);
+    // A selected prefab member belongs to a linked import too: re-import its
+    // enclosing instance (the members' host-side anchor; member ids do not
+    // exist in the host document).
+    var target = ids.first;
+    if (_ctrl.isPrefabMember(target)) {
+      target = _ctrl.memberOrigin(target)?.instanceId ?? target;
+    }
+    final record = linkedImportRecordFor(_ctrl, target);
     if (record == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('The selection is not a linked glTF.')),
@@ -603,7 +611,7 @@ class _EditorShellState extends State<EditorShell> with WidgetsBindingObserver {
     );
     if (options == null || !mounted) return;
     try {
-      await reimportLinkedModel(_ctrl, ids.first, options);
+      await reimportLinkedModel(_ctrl, target, options);
     } on IOException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
@@ -945,10 +953,12 @@ class _EditorShellState extends State<EditorShell> with WidgetsBindingObserver {
     final options = await showGlbImportOptions(context);
     if (options == null || !mounted) return;
     // Graft under the selected node when exactly one is selected, else add to
-    // the scene roots.
-    final parentId = _ctrl.selection.ids.length == 1
-        ? _ctrl.selection.ids.first
-        : null;
+    // the scene roots. A selected prefab member resolves to its enclosing
+    // instance (its host-side anchor): members only exist in the composed
+    // document, so passing a member id down to the graft or to
+    // instantiatePrefab cannot be resolved and the model would silently fail
+    // to appear.
+    final parentId = _ctrl.importParentForSelection();
     if (options.linkToSource && _ctrl.baseDirectory == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -986,6 +996,14 @@ class _EditorShellState extends State<EditorShell> with WidgetsBindingObserver {
         ).showSnackBar(SnackBar(content: Text('Could not import: $e')));
       }
     } on FormatException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not import: ${e.message}')),
+        );
+      }
+    } on CommandException catch (e) {
+      // Command failures (for example instantiatePrefab rejecting a parent
+      // that does not resolve) must never fail silently: surface them.
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Could not import: ${e.message}')),

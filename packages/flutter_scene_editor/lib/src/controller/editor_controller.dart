@@ -84,6 +84,27 @@ List<LocalId> topLevelSelectionOver(SceneQuery graph, Set<LocalId> selected) {
   return ordered;
 }
 
+/// The node a newly imported model should graft under when [selected] is the
+/// single selected node, or null to land the import at the document roots.
+///
+/// Pure so it is testable headlessly. A host-document node parents its own
+/// graft. A prefab member only exists in the composed document — the host
+/// one does not contain it, so passing its id down to a graft or to
+/// `instantiatePrefab` would fail (linked imports) or silently fall back
+/// away from the selection (embedded grafts). A member's host-side anchor is
+/// the enclosing instance, so a member-selected import grafts under the
+/// instance — the same thing selecting the instance itself does. Any other
+/// id (nothing selected, multiple selected, stale) resolves to null.
+LocalId? resolveImportParentId(
+  SceneDocument hostDocument,
+  Map<LocalId, PrefabMemberOrigin> memberOrigins,
+  LocalId? selected,
+) {
+  if (selected == null) return null;
+  if (hostDocument.nodes.containsKey(selected)) return selected;
+  return memberOrigins[selected]?.instanceId;
+}
+
 /// Reflects an [EditorSession] into a live [Scene] and back.
 class EditorController extends ChangeNotifier
     implements AnimationPreviewTarget {
@@ -1087,6 +1108,20 @@ class EditorController extends ChangeNotifier
   /// key (the instance is its ancestor in the composed tree).
   List<LocalId> topLevelSelectionInDisplay() =>
       topLevelSelection(graph: displayQuery);
+
+  /// The node the next import should graft under for the current selection,
+  /// or null to add to the document roots.
+  ///
+  /// A single selected prefab member resolves to its enclosing instance (its
+  /// host-side anchor): members only exist in the composed document, so
+  /// passing a member id down to a graft or to `instantiatePrefab` cannot be
+  /// resolved and the imported model would fail to appear. See
+  /// [resolveImportParentId].
+  LocalId? importParentForSelection() => resolveImportParentId(
+    document,
+    _memberOrigins,
+    selection.ids.length == 1 ? selection.ids.first : null,
+  );
 
   /// Read queries over the display (composed) document — the tree the
   /// outliner draws and the keying path walks. Cheap to build (no state);
