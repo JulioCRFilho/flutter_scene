@@ -642,7 +642,7 @@ class _SimpleComponentPropertyResolver extends ComponentPropertyResolver {
 
   @override
   PropertyValue evaluate(double time, double weight) {
-    final stride = componentPropertyFloatStride(_kindValue)!;
+    final int stride = componentPropertyFloatStride(_kindValue)!;
     if (_times.isEmpty || _values.isEmpty) {
       return _build(_neutralSlots());
     }
