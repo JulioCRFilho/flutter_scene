@@ -347,29 +347,83 @@ void _serializeAnimations(
     final channels = <AnimationChannelSpec>[];
     for (final channel in animation.channels) {
       final resolver = channel.resolver;
-      final AnimationProperty property;
       final List<double> times;
       final Float32List keyframes;
-      switch (resolver) {
-        case engine.TranslationTimelineResolver():
+      LocalId? keyframesBlob;
+      String? componentType;
+      String? componentProperty;
+      final AnimationProperty property;
+
+      switch (channel.bindTarget.property) {
+        case engine.AnimationProperty.translation:
+          if (resolver is! engine.TranslationTimelineResolver) {
+            debugPrint(
+              'fscene: animation "${animation.name}" translation channel with '
+              'a custom resolver (${resolver.runtimeType}) is not '
+              'serializable; skipped',
+            );
+            continue;
+          }
           property = AnimationProperty.translation;
           times = resolver.times;
           keyframes = _packVec3(resolver.values);
-        case engine.RotationTimelineResolver():
+        case engine.AnimationProperty.rotation:
+          if (resolver is! engine.RotationTimelineResolver) {
+            debugPrint(
+              'fscene: animation "${animation.name}" rotation channel with '
+              'a custom resolver (${resolver.runtimeType}) is not '
+              'serializable; skipped',
+            );
+            continue;
+          }
           property = AnimationProperty.rotation;
           times = resolver.times;
           keyframes = _packQuaternions(resolver.values);
-        case engine.ScaleTimelineResolver():
+        case engine.AnimationProperty.scale:
+          if (resolver is! engine.ScaleTimelineResolver) {
+            debugPrint(
+              'fscene: animation "${animation.name}" scale channel with '
+              'a custom resolver (${resolver.runtimeType}) is not '
+              'serializable; skipped',
+            );
+            continue;
+          }
           property = AnimationProperty.scale;
           times = resolver.times;
           keyframes = _packVec3(resolver.values);
-        default:
-          debugPrint(
-            'fscene: animation "${animation.name}" channel with a custom '
-            'resolver (${resolver.runtimeType}) is not serializable; skipped',
-          );
+        case engine.AnimationProperty.weights:
+          // Morph weights are imported-model state; the editor does not
+          // author them, and they round-trip through the model itself.
           continue;
+        case engine.AnimationProperty.componentProperty:
+          if (resolver is! engine.ComponentPropertyResolver) {
+            debugPrint(
+              'fscene: animation "${animation.name}" component-property '
+              'channel with a non-ComponentPropertyResolver '
+              '(${resolver.runtimeType}) is not serializable; skipped',
+            );
+            continue;
+          }
+          // Float-encodable kinds pack one or more floats per keyframe into
+          // the keyframes payload; structured kinds (distributions, curves,
+          // gradients, maps, ...) serialize each keyframe's value into the
+          // keyframesBlob bytes payload instead and the resolver decodes
+          // them back at load time.
+          property = AnimationProperty.componentProperty;
+          times = resolver.times;
+          keyframes = resolver.packKeyframes();
+          componentType = resolver.componentType;
+          componentProperty = resolver.propertyName;
+          keyframesBlob = resolver.blobValues.isEmpty
+              ? null
+              : _bytesPayload(
+                  document,
+                  engine.encodeComponentPropertyKeyframesBlob(
+                    resolver.blobValues,
+                  ),
+                );
       }
+
       final nodeName = channel.bindTarget.nodeName;
       final target = nodeName == root.name
           ? root
@@ -381,8 +435,11 @@ void _serializeAnimations(
           target: (target != null ? ids[target] : null) ?? document.newId(),
           targetName: nodeName,
           property: property,
+          componentType: componentType,
+          componentProperty: componentProperty,
           timeline: _floatsPayload(document, Float32List.fromList(times)),
           keyframes: _floatsPayload(document, keyframes),
+          keyframesBlob: keyframesBlob,
         ),
       );
     }
@@ -419,6 +476,19 @@ LocalId _floatsPayload(SceneDocument document, Float32List floats) => document
           floats.offsetInBytes,
           floats.lengthInBytes,
         ),
+      ),
+    )
+    .id;
+
+/// Adds an opaque bytes payload (used by component property channels for
+/// their serialized per-keyframe values).
+LocalId _bytesPayload(SceneDocument document, Uint8List bytes) => document
+    .addPayload(
+      PayloadSpec(
+        document.newId(),
+        encoding: PayloadEncoding.bytes,
+        length: bytes.lengthInBytes,
+        bytes: bytes,
       ),
     )
     .id;

@@ -12,6 +12,9 @@ import 'dart:typed_data';
 import 'package:vector_math/vector_math.dart';
 
 import 'package:flutter_scene/src/animation.dart' as engine;
+import 'package:flutter_scene/src/fscene/realize/realize.dart'
+    show defaultComponentRegistry;
+import 'package:scene/schema.dart' show ComponentPropertyKind;
 import 'package:scene/scene.dart';
 import 'package:flutter_scene/src/node.dart';
 import 'package:flutter_scene/src/skin.dart';
@@ -141,10 +144,48 @@ engine.Animation? buildAnimation(
           targetCount: targetCount,
           interpolation: interpolation,
         );
+      case AnimationProperty.componentProperty:
+        final componentType = channel.componentType;
+        final propertyName = channel.componentProperty;
+        if (componentType == null || propertyName == null) {
+          // Malformed channel (the spec's constructor assert makes this
+          // unreachable for well-formed documents); skip.
+          continue;
+        }
+        final kind = _componentPropertyKind(componentType, propertyName);
+        if (kind == null) {
+          sceneLog(
+            'fscene: animation "${spec.name}" channel targets unknown '
+            'component property "$componentType.$propertyName"; skipped',
+          );
+          continue;
+        }
+        property = engine.AnimationProperty.componentProperty;
+        resolver = engine.PropertyResolver.makeComponentPropertyTimeline(
+          times,
+          values,
+          kind: kind,
+          componentType: componentType,
+          propertyName: propertyName,
+          interpolation: interpolation,
+          keyframesBlobPayload: channel.keyframesBlob == null
+              ? null
+              : document.payload(channel.keyframesBlob!)?.bytes,
+        );
     }
     channels.add(
       engine.AnimationChannel(
-        bindTarget: engine.BindKey(nodeName: name, property: property),
+        bindTarget: engine.BindKey(
+          nodeName: name,
+          property: property,
+          componentType: property == engine.AnimationProperty.componentProperty
+              ? channel.componentType
+              : null,
+          componentProperty:
+              property == engine.AnimationProperty.componentProperty
+              ? channel.componentProperty
+              : null,
+        ),
         resolver: resolver,
       ),
     );
@@ -162,6 +203,21 @@ List<Matrix4> _matrices(PayloadSpec? payload) {
         Float32List.fromList(floats.sublist(i * 16, i * 16 + 16)),
       ),
   ];
+}
+
+/// The [ComponentPropertyKind] of component property
+/// `componentType.propertyName` per the default component registry's
+/// schemas, or null when the component type or property is unknown.
+ComponentPropertyKind? _componentPropertyKind(
+  String componentType,
+  String propertyName,
+) {
+  final codec = defaultComponentRegistry().codecFor(componentType);
+  if (codec == null) return null;
+  for (final def in codec.propertySchema) {
+    if (def.name == propertyName) return def.kind;
+  }
+  return null;
 }
 
 // Reads a payload's bytes as native-endian float32s, matching how the emitter

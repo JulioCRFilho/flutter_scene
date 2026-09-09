@@ -90,6 +90,52 @@ abstract class PropertyResolver {
       interpolation,
     );
   }
+
+  /// Creates a component property resolver that evaluates a timeline of
+  /// keyframe values for a named component property.
+  ///
+  /// [kind] is the property's [ComponentPropertyKind], which decides how the
+  /// flattened [keyframes] payload is decoded. Float-encodable kinds
+  /// (boolean, integer, number, vec2, vec3, vec4, quaternion, color,
+  /// matrix4) store one or more floats per keyframe in [keyframes]; every
+  /// other kind (string, list, map, object, union, distribution, curve,
+  /// gradient, and the reference kinds) carries one pre-serialized
+  /// [PropertyValue] per keyframe in [keyframesBlobPayload] (the format
+  /// produced by [encodeComponentPropertyKeyframesBlob]) and [keyframes] is
+  /// unused (pass an empty list).
+  ///
+  /// [componentType] and [propertyName] identify the animated component
+  /// property; the [AnimationClip] bind/restore lifecycle uses them to
+  /// resolve the live component and snapshot its authored value before
+  /// playback writes animated values through the component codec.
+  static PropertyResolver makeComponentPropertyTimeline(
+    List<double> times,
+    Float32List keyframes, {
+    required ComponentPropertyKind kind,
+    required String componentType,
+    required String propertyName,
+    TimelineInterpolation interpolation = TimelineInterpolation.linear,
+    Uint8List? keyframesBlobPayload,
+  }) {
+    if (componentPropertyFloatStride(kind) != null) {
+      return _SimpleComponentPropertyResolver._(
+        times: times,
+        values: keyframes.toList(),
+        kindValue: kind,
+        componentTypeValue: componentType,
+        propertyNameValue: propertyName,
+        interpolation: interpolation,
+      );
+    }
+    final blob = keyframesBlobPayload;
+    return _BlobComponentPropertyResolver._(
+      times: times,
+      values: blob == null ? const [] : decodeComponentPropertyKeyframesBlob(blob),
+      kindValue: kind,
+      componentTypeValue: componentType,
+      propertyNameValue: propertyName,
+    );
+  }
 }
 
 class _TimelineKey {
@@ -430,5 +476,322 @@ class MorphWeightsTimelineResolver extends TimelineResolver {
       }
       animated[i] += (value - bind[i]) * weight;
     }
+  }
+}
+/// The float count one keyframe occupies for float-encodable component
+/// property kinds, or null when the kind is carried as a serialized value
+/// blob instead.
+///
+/// This is the serialization contract shared by the scene serializer
+/// (`realize.dart`), the editor keyframe commands, and the animation
+/// resolvers. Layouts match [encodePropertyValue]: color is four linear RGBA
+/// doubles, quaternion is `(x, y, z, w)`, and matrix4 is row-major 16-float
+/// storage.
+int? componentPropertyFloatStride(ComponentPropertyKind kind) {
+  switch (kind) {
+    case ComponentPropertyKind.boolean:
+    case ComponentPropertyKind.integer:
+    case ComponentPropertyKind.number:
+      return 1;
+    case ComponentPropertyKind.vec2:
+      return 2;
+    case ComponentPropertyKind.vec3:
+      return 3;
+    case ComponentPropertyKind.vec4:
+    case ComponentPropertyKind.quaternion:
+    case ComponentPropertyKind.color:
+      return 4;
+    case ComponentPropertyKind.matrix4:
+      return 16;
+    default:
+      return null;
+  }
+}
+
+/// Encodes [values] as the `keyframesBlob` payload of a component property
+/// channel: a UTF-8 JSON array of [encodePropertyValue] trees, one per
+/// keyframe.
+Uint8List encodeComponentPropertyKeyframesBlob(List<PropertyValue> values) {
+  return Uint8List.fromList(utf8.encode(jsonEncode(<Object?>[
+    for (final value in values)
+      encodePropertyValue(value, (id) => id.toToken()),
+  ])));
+}
+
+/// Decodes a `keyframesBlob` payload produced by
+/// [encodeComponentPropertyKeyframesBlob] back into per-keyframe
+/// [PropertyValue]s (same order as the channel's keyframe times).
+List<PropertyValue> decodeComponentPropertyKeyframesBlob(Uint8List? bytes) {
+  if (bytes == null || bytes.lengthInBytes == 0) return const [];
+  final text = bytes.offsetInBytes == 0
+      ? utf8.decode(bytes)
+      : utf8.decode(Uint8List.fromList(bytes));
+  final tree = jsonDecode(text) as List;
+  return [for (final entry in tree) decodePropertyValue(entry)];
+}
+
+/// Evaluates a component property across a keyframed timeline, returning a
+/// [PropertyValue] instead of writing into an [AnimationTransforms] scratch
+/// pose.
+///
+/// The owning [AnimationClip] is responsible for the borrow→snapshot→apply→
+/// restore lifecycle: it resolves the live [Component] through the component
+/// registry by [componentType], snapshots its current value at bind time,
+/// writes each [evaluate] result through [ComponentCodec.writeLiveProperty]
+/// during playback, and restores the snapshot when the clip stops or its
+/// weight reaches zero.
+///
+/// Subclasses cover the two payload shapes: float-encodable kinds stored as a
+/// flat [Float32List] ([_SimpleComponentPropertyResolver]) and structured
+/// kinds stored as serialized value blobs ([_BlobComponentPropertyResolver]).
+abstract class ComponentPropertyResolver extends TimelineResolver {
+  /// Creates a component property resolver.
+  ComponentPropertyResolver._(
+    List<double> times,
+    TimelineInterpolation interpolation,
+  ) : super._(times, interpolation);
+
+  /// The animated property's kind (see [ComponentPropertyKind]).
+  ComponentPropertyKind get kind;
+
+  /// The component type name identifying the target component
+  /// (`particleEmitter`, `directionalLight`, ...).
+  String get componentType;
+
+  /// The property name within the component.
+  String get propertyName;
+
+  /// Whether the kind is float-encodable (see [componentPropertyFloatStride]).
+  bool get isFloatEncodable => componentPropertyFloatStride(kind) != null;
+
+  /// Evaluates the timeline at [time] into a [PropertyValue].
+  ///
+  /// [weight] (normally the clip's blended weight, normalized across
+  /// concurrent clips) scales the interpolant for float-encodable kinds, so
+  /// `0` holds the previous keyframe and `1` reaches the next one exactly.
+  /// Blob kinds ignore it: structured values are discrete and hold their
+  /// last keyframe's value.
+  PropertyValue evaluate(double time, double weight);
+
+  /// Evaluates at [time] with the neutral weight `1`.
+  PropertyValue evaluateAt(double time) => evaluate(time, 1.0);
+
+  /// Packs the keyframe values as flat floats for
+  /// [AnimationChannelSpec.keyframes]. Empty for blob kinds, whose values
+  /// serialize through [blobValues].
+  Float32List packKeyframes();
+
+  /// The per-keyframe values for blob kinds. Empty for float-encodable
+  /// kinds. Read by the scene serializer.
+  List<PropertyValue> get blobValues => const [];
+
+  @override
+  void apply(AnimationTransforms target, double timeInSeconds, double weight) {
+    // Component properties are written onto the live component by the owning
+    // clip rather than blended into a transform scratch pose.
+  }
+}
+
+/// Resolves float-encodable component properties (boolean, integer, number,
+/// vec2, vec3, vec4, quaternion, color, matrix4) from a flat Float32List
+/// keyframe payload.
+///
+/// Values interpolate linearly between neighboring keyframes (step holds the
+/// previous keyframe; quaternion interpolates by slerp). [weight] scales the
+/// interpolant so a weighted blend holds back toward the previous keyframe.
+/// Cubic tangents are not authored for component properties, so a cubic
+/// channel resolves as linear.
+class _SimpleComponentPropertyResolver extends ComponentPropertyResolver {
+  final Float32List _values;
+  final ComponentPropertyKind _kindValue;
+  final String _componentTypeValue;
+  final String _propertyNameValue;
+
+  _SimpleComponentPropertyResolver._({
+    required List<double> times,
+    required List<double> values,
+    required ComponentPropertyKind kindValue,
+    required String componentTypeValue,
+    required String propertyNameValue,
+    TimelineInterpolation interpolation = TimelineInterpolation.linear,
+  }) : _values = Float32List.fromList(values),
+       _kindValue = kindValue,
+       _componentTypeValue = componentTypeValue,
+       _propertyNameValue = propertyNameValue,
+       super._(times, interpolation) {
+    final int stride = componentPropertyFloatStride(_kindValue)!;
+    assert(
+      _values.isEmpty || _values.length == times.length * stride,
+      'Component property "$_propertyNameValue" keyframe payload must hold '
+      '$stride float(s) per keyframe (${times.length} keys), '
+      'got ${_values.length} floats',
+    );
+  }
+
+  @override
+  ComponentPropertyKind get kind => _kindValue;
+
+  @override
+  String get componentType => _componentTypeValue;
+
+  @override
+  String get propertyName => _propertyNameValue;
+
+  @override
+  Float32List packKeyframes() => _values;
+
+  @override
+  PropertyValue evaluate(double time, double weight) {
+    final stride = componentPropertyFloatStride(_kindValue)!;
+    if (_times.isEmpty || _values.isEmpty) {
+      return _build(_neutralSlots());
+    }
+    if (time <= _times.first) return _build(_slotsAt(0));
+    if (time >= _times.last) {
+      return _build(_slotsAt(_times.length - 1));
+    }
+
+    final key = _getTimelineKey(time);
+    if (key.index == 0) return _build(_slotsAt(0));
+    // Step holds the previous keyframe's value; otherwise [weight] scales
+    // the interpolant between the previous and current keyframes.
+    final t = (_interpolation == TimelineInterpolation.step
+            ? 0.0
+            : key.lerp * weight)
+        .clamp(0.0, 1.0);
+    final base = key.index * stride;
+    return _build(
+      _lerpedSlots(base - stride, base, stride, t),
+    );
+  }
+
+  /// The [stride] value slots of keyframe [index].
+  List<double> _slotsAt(int index) {
+    final stride = componentPropertyFloatStride(_kindValue)!;
+    return [
+      for (var i = 0; i < stride; i++) _values[index * stride + i],
+    ];
+  }
+
+  /// Component-wise lerp of the value slots at keyframes [prevBase] and
+  /// [base] (float offsets into the payload). Boolean holds; quaternion
+  /// slerps; everything else lerps per component.
+  List<double> _lerpedSlots(int prevBase, int base, int stride, double t) {
+    if (t >= 1.0) return _slotsAt(base ~/ stride);
+    if (t <= 0.0) return _slotsAt(prevBase ~/ stride);
+    if (_kindValue == ComponentPropertyKind.boolean) {
+      return _slotsAt(prevBase ~/ stride);
+    }
+    if (_kindValue == ComponentPropertyKind.quaternion) {
+      final value = _quaternionAt(prevBase).slerp(_quaternionAt(base), t);
+      return [value.x, value.y, value.z, value.w];
+    }
+    return [
+      for (var i = 0; i < stride; i++)
+        _values[prevBase + i] + (_values[base + i] - _values[prevBase + i]) * t,
+    ];
+  }
+
+  Quaternion _quaternionAt(int base) => Quaternion(
+        _values[base],
+        _values[base + 1],
+        _values[base + 2],
+        _values[base + 3],
+      );
+
+  /// Builds the kind's [PropertyValue] from [slots] (in
+  /// [componentPropertyFloatStride] order).
+  PropertyValue _build(List<double> slots) {
+    switch (_kindValue) {
+      case ComponentPropertyKind.boolean:
+        return BoolValue(slots.first != 0.0);
+      case ComponentPropertyKind.integer:
+        return IntValue(slots.first.round());
+      case ComponentPropertyKind.number:
+        return DoubleValue(slots.first);
+      case ComponentPropertyKind.vec2:
+        return Vec2Value(Vector2(slots[0], slots[1]));
+      case ComponentPropertyKind.vec3:
+        return Vec3Value(Vector3(slots[0], slots[1], slots[2]));
+      case ComponentPropertyKind.vec4:
+        return Vec4Value(Vector4(slots[0], slots[1], slots[2], slots[3]));
+      case ComponentPropertyKind.quaternion:
+        return QuaternionValue(
+          Quaternion(slots[0], slots[1], slots[2], slots[3])..normalize(),
+        );
+      case ComponentPropertyKind.color:
+        return ColorValue(slots[0], slots[1], slots[2], slots[3]);
+      case ComponentPropertyKind.matrix4:
+        return Matrix4Value(Matrix4.fromFloat32List(Float32List.fromList(slots)));
+      default:
+        throw StateError('Unhandled kind $_kindValue');
+    }
+  }
+
+  /// The value slots standing in for an empty timeline: zero for numeric
+  /// kinds, identity for rotation and matrix, opaque for color.
+  List<double> _neutralSlots() => switch (_kindValue) {
+        ComponentPropertyKind.quaternion => const [0.0, 0.0, 0.0, 1.0],
+        ComponentPropertyKind.color => const [0.0, 0.0, 0.0, 1.0],
+        ComponentPropertyKind.matrix4 => const [
+            1, 0, 0, 0, //
+            0, 1, 0, 0, //
+            0, 0, 1, 0, //
+            0, 0, 0, 1,
+          ],
+        _ => List.filled(componentPropertyFloatStride(_kindValue)!, 0.0),
+      };
+}
+
+/// Resolves structured component properties (string, list, map, object,
+/// union, distribution, curve, gradient, and the reference kinds) from a
+/// list of pre-serialized per-keyframe [PropertyValue]s.
+///
+/// Structured values have no meaningful interpolation, so the timeline is
+/// step-wise: a time holds the value of the last keyframe at or before it.
+/// [weight] is ignored.
+class _BlobComponentPropertyResolver extends ComponentPropertyResolver {
+  final List<PropertyValue> _values;
+  final ComponentPropertyKind _kindValue;
+  final String _componentTypeValue;
+  final String _propertyNameValue;
+
+  _BlobComponentPropertyResolver._({
+    required List<double> times,
+    required List<PropertyValue> values,
+    required ComponentPropertyKind kindValue,
+    required String componentTypeValue,
+    required String propertyNameValue,
+  })  : _values = values,
+        _kindValue = kindValue,
+        _componentTypeValue = componentTypeValue,
+        _propertyNameValue = propertyNameValue,
+        super._(times, TimelineInterpolation.step) {
+    assert(_values.isEmpty || _values.length == times.length);
+  }
+
+  @override
+  ComponentPropertyKind get kind => _kindValue;
+
+  @override
+  String get componentType => _componentTypeValue;
+
+  @override
+  String get propertyName => _propertyNameValue;
+
+  @override
+  Float32List packKeyframes() => Float32List(0);
+
+  @override
+  List<PropertyValue> get blobValues => List.unmodifiable(_values);
+
+  @override
+  PropertyValue evaluate(double time, double weight) {
+    if (_values.isEmpty || _times.isEmpty) return MapValue({});
+    if (time <= _times.first || _times.length == 1) return _values.first;
+    if (time >= _times.last) return _values.last;
+    final next = _times.indexWhere((t) => t >= time);
+    // Step semantics: hold the previous keyframe's value.
+    return _values[next <= 0 ? 0 : next - 1];
   }
 }

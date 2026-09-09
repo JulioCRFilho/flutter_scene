@@ -63,9 +63,13 @@ class AnimationPlayer {
   /// Unregisters [clip] so it no longer contributes to the blend.
   ///
   /// Bind poses recorded for its nodes are kept (other clips may share
-  /// them). No-op when [clip] is not registered.
+  /// them). The clip's borrowed component properties return to their bind
+  /// snapshots, so removal is side-effect free. No-op when [clip] is not
+  /// registered.
   void removeClip(AnimationClip clip) {
+    if (!_clips.containsValue(clip)) return;
     _clips.removeWhere((_, registered) => identical(registered, clip));
+    clip._restoreComponentProperties();
   }
 
   /// Returns the registered clip whose [Animation.name] equals [name],

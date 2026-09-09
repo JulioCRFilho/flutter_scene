@@ -13,6 +13,17 @@ enum AnimationProperty {
 
   /// Animates the node's morph target weights (see [Node.setMorphWeights]).
   weights,
+
+  /// Animates a property of a component attached to the target node.
+  ///
+  /// The specific component type and property name are carried by the
+  /// [BindKey.componentType] and [BindKey.componentProperty] fields, and
+  /// serialized in [AnimationChannelSpec] as [componentType] and
+  /// [componentProperty]. At runtime a [ComponentPropertyResolver] evaluates
+  /// keyframe payloads for the named property and the [AnimationClip]
+  /// borrow→snapshot→apply→restore lifecycle keeps the authored component
+  /// in the `.fscene` untouched.
+  componentProperty,
 }
 
 /// Identifies a single animation target as a (node name, property) pair.
@@ -25,14 +36,33 @@ class BindKey implements Comparable<BindKey> {
   /// [Node.getChildByName].
   final String nodeName;
 
-  /// Which component of the node's transform this channel drives.
+  /// Which component of the node this channel drives.
   final AnimationProperty property;
 
+  /// The component type this channel drives, when [property] is
+  /// [AnimationProperty.componentProperty]. Null for transform channels.
+  final String? componentType;
+
+  /// The component property name this channel drives, when [property] is
+  /// [AnimationProperty.componentProperty]. Null for transform channels.
+  final String? componentProperty;
+
   /// Creates a key that targets [nodeName] / [property].
+  ///
+  /// When [property] is [AnimationProperty.componentProperty], both
+  /// [componentType] and [componentProperty] must be provided.
   BindKey({
     required this.nodeName,
     this.property = AnimationProperty.translation,
-  });
+    this.componentType,
+    this.componentProperty,
+  }) {
+    assert(
+      property != AnimationProperty.componentProperty ||
+          (componentType != null && componentProperty != null),
+      'componentProperty channels must carry componentType and componentProperty',
+    );
+  }
 
   @override
   int compareTo(BindKey other) {
@@ -41,7 +71,20 @@ class BindKey implements Comparable<BindKey> {
     }
     return -1;
   }
+
+  @override
+  bool operator ==(Object other) {
+    return other is BindKey &&
+        nodeName == other.nodeName &&
+        property == other.property &&
+        componentType == other.componentType &&
+        componentProperty == other.componentProperty;
+  }
+
+  @override
+  int get hashCode => Object.hash(nodeName, property, componentType, componentProperty);
 }
+
 
 /// One keyframed track within an [Animation], pairing a [BindKey] target
 /// with a [PropertyResolver] that produces values over time.

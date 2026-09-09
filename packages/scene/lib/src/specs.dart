@@ -1126,6 +1126,23 @@ enum AnimationProperty {
   /// flattened glTF shape, one weight per target per keyframe; the target
   /// count is the keyframe count divided by the timeline length.
   weights,
+
+  /// Drives a named property of a component attached to the target node.
+  ///
+  /// The component type and property name are carried by [AnimationChannelSpec]
+  /// fields [componentType] and [componentProperty]. The channel's keyframe
+  /// payload is interpreted according to the component property's kind
+  /// (float, vec3, color, distribution, curve, gradient, etc.) as declared
+  /// by the component codec, and is resolved at runtime by a
+  /// [ComponentPropertyResolver] (in `package:flutter_scene`) that evaluates
+  /// the stored values at the playback time.
+  ///
+  /// The animation borrows the target component at bind time and snapshots
+  /// its current property values, then applies animated values during
+  /// playback and restores the snapshot when the animation stops or its
+  /// weight reaches zero — so the authored component in the `.fscene` is
+  /// never modified by playback.
+  componentProperty,
 }
 
 /// How an animation channel produces values between its keyframes.
@@ -1145,21 +1162,41 @@ enum AnimationInterpolation {
 }
 
 /// One animation channel: a keyframe timeline driving one [property] of one
-/// target node.
+/// target.
+///
+/// Channels drive either a node transform property ([AnimationProperty]
+/// values other than [AnimationProperty.componentProperty]) or a component
+/// property on a node ([AnimationProperty.componentProperty] — the channel's
+/// [componentType] and [componentProperty] name which property of that
+/// component type is animated).
 ///
 /// Binds to its target by stable id ([target]); [targetName] is retained as
 /// a clone-friendly fallback and for readable merges.
 /// {@category Documents}
 class AnimationChannelSpec {
   /// Creates a channel driving [property] of [target].
+  ///
+  /// When [property] is [AnimationProperty.componentProperty], [componentType]
+  /// and [componentProperty] must be provided to identify which component and
+  /// which of its properties are animated. For transform properties these are
+  /// ignored (null is fine).
   AnimationChannelSpec({
     required this.target,
     this.targetName,
     required this.property,
+    this.componentType,
+    this.componentProperty,
     required this.timeline,
     required this.keyframes,
+    this.keyframesBlob,
     this.interpolation,
-  });
+  }) {
+    assert(
+      property != AnimationProperty.componentProperty ||
+          (componentType != null && componentProperty != null),
+      'componentProperty channels must carry componentType and componentProperty',
+    );
+  }
 
   /// The node this channel animates (primary, id-based binding).
   final LocalId target;
@@ -1167,14 +1204,38 @@ class AnimationChannelSpec {
   /// The target node's name (fallback binding, for clones and merges).
   final String? targetName;
 
-  /// Which transform channel this drives.
+  /// Which property this channel drives.
+  ///
+  /// For transform properties ([translation], [rotation], [scale],
+  /// [weights]) this drives the corresponding part of [Node.localTransform]
+  /// or morph weights. For [componentProperty] this drives a property of a
+  /// component attached to the target node; the specific component type and
+  /// property name are in [componentType] and [componentProperty].
   final AnimationProperty property;
+
+  /// The component type this channel drives, when [property] is
+  /// [AnimationProperty.componentProperty]. Null for transform channels.
+  final String? componentType;
+
+  /// The component property name this channel drives, when [property] is
+  /// [AnimationProperty.componentProperty]. Null for transform channels.
+  final String? componentProperty;
 
   /// The binary chunk of keyframe times (seconds).
   final LocalId timeline;
 
   /// The binary chunk of keyframe values.
   final LocalId keyframes;
+
+  /// The binary chunk of keyframe values for complex component properties
+  /// (distribution, curve, gradient, object, union, string) that cannot be
+  /// represented as flat Float32List. When non-null, this carries a bytes
+  /// payload whose bytes are a serialized [PropertyValue] (or list of them).
+  ///
+  /// For transform channels and simple component properties (bool, double,
+  /// int, vec3, color) this is null and the values are in [keyframes] as
+  /// floats.
+  final LocalId? keyframesBlob;
 
   /// How this channel interpolates between keyframes. Null means linear
   /// (the historical default, and what documents without this field load
