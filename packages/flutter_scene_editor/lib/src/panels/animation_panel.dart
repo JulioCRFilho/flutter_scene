@@ -690,7 +690,7 @@ class _AnimationPanelState extends State<AnimationPanel> {
   /// Adds one keyframe capturing the channel target's current pose.
   Future<void> _addKeyAt(AnimationChannelSpec channel, double time) async {
     try {
-      await _controller.run('setAnimationKeyframe', {
+      final params = <String, Object?>{
         'animationId':
             _controller.previewAnimationId?.toToken() ??
             _animationId?.toToken(),
@@ -701,19 +701,83 @@ class _AnimationPanelState extends State<AnimationPanel> {
         if (channel.targetName != null) 'targetName': channel.targetName,
         'property': channel.property.name,
         'time': time.clamp(0.0, _maxKeyTime).toDouble(),
+      };
+      if (channel.property == AnimationProperty.componentProperty) {
+        // Component property keys carry the float-encoded value read from the
+        // document (what the inspector shows): the authored value, not a pose.
+        params['componentType'] = channel.componentType;
+        params['componentProperty'] = channel.componentProperty;
+        final value = _componentValueFor(channel);
+        if (value == null) {
+          _showError(
+            StateError(
+              'No authored ${channel.componentType ?? 'component'}.'
+              '${channel.componentProperty ?? 'property'} value to key on '
+              '${channel.target.toToken()}; change the property in the '
+              'inspector first (only values stored in the document can be '
+              'captured).',
+            ),
+          );
+          return;
+        }
+        params['value'] = value;
+      } else {
         // Capture the visible pose of the channel's live target (the node, or
         // the named descendant inside a prefab instance), so the added key
         // records what the user sees rather than a stale document pose.
-        ...?_livePoseFor(
-          channel.target,
-          channel.property,
-          targetName: channel.targetName,
-        ),
-      });
+        params.addAll(
+          _livePoseFor(
+                channel.target,
+                channel.property,
+                targetName: channel.targetName,
+              ) ??
+              const {},
+        );
+      }
+      await _controller.run('setAnimationKeyframe', params);
     } on Exception catch (error) {
       _showError(error);
     }
   }
+
+  /// The float-encoded authored value of [channel]'s component property, read
+  /// from the document (the value the inspector shows), or null when the
+  /// node, component, or property has no serialized value yet. The document
+  /// serializes only values that differ from the component's default, so a
+  /// property sitting at its default reads null — callers surface that as a
+  /// captured-nothing error rather than keying a wrongly-sized row of zeros.
+  List<double>? _componentValueFor(AnimationChannelSpec channel) {
+    final node = _controller.document.node(channel.target);
+    if (node == null) return null;
+    for (final component in node.components) {
+      if (component.type != channel.componentType) continue;
+      final value = component.properties[channel.componentProperty ?? ''];
+      if (value == null) return null;
+      return _floatSlots(value);
+    }
+    return null;
+  }
+
+  /// The float slots [value] carries, in the ordering the animation keyframe
+  /// payloads use: a single scalar for booleans/integers/numbers, storage
+  /// order for vectors/quaternions, RGBA for colors, row-major for matrices.
+  List<double> _floatSlots(PropertyValue value) => switch (value) {
+    BoolValue() => [value.value ? 1.0 : 0.0],
+    IntValue() => [value.value.toDouble()],
+    DoubleValue() => [value.value],
+    Vec2Value() => [value.value.x, value.value.y],
+    Vec3Value() => [value.value.x, value.value.y, value.value.z],
+    Vec4Value() => [value.value.x, value.value.y, value.value.z, value.value.w],
+    QuaternionValue() => [
+      value.value.x,
+      value.value.y,
+      value.value.z,
+      value.value.w,
+    ],
+    ColorValue() => [value.r, value.g, value.b, value.a],
+    Matrix4Value() => [...value.value.storage],
+    _ => const <double>[],
+  };
 
   /// The pose the channel's live target currently shows, as the value map
   /// `setAnimationKeyframe` accepts.
@@ -758,6 +822,11 @@ class _AnimationPanelState extends State<AnimationPanel> {
           'scale': {'x': s.x, 'y': s.y, 'z': s.z},
         };
       case AnimationProperty.weights:
+      // Morph weights are imported-model state; nothing to key from the
+      // live node.
+      case AnimationProperty.componentProperty:
+        // Component property channels key the value the caller passes
+        // explicitly ("value"); there is no pose to capture from the node.
         return null;
     }
   }

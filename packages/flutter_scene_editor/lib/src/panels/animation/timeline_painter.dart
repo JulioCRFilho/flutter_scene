@@ -41,10 +41,8 @@ class _TimelinePainter extends CustomPainter {
   /// playback; label texts only change with zoom/scroll and color with the
   /// clip boundary, so key on (text, color, size, weight, layout width) and
   /// reuse the laid-out painter. Cleared wholesale when it grows stale.
-  static final Map<
-    (String, int, double, FontWeight, double?),
-    TextPainter
-  > _labelCache = {};
+  static final Map<(String, int, double, FontWeight, double?), TextPainter>
+  _labelCache = {};
 
   static TextPainter _cachedLabel(
     String text, {
@@ -163,11 +161,14 @@ class _TimelinePainter extends CustomPainter {
         ).paint(canvas, Offset(2, top + (_rowHeight - 11) / 2));
         sawChannelInGroup = false;
       } else {
-        // End before the lane's ✕ button (left: labelWidth - 20), which
-        // shares the label column with this title.
+        // Component property lanes (particle emitter or light fields) label
+        // in the tertiary tone so they read apart from transform lanes, which
+        // share the node header's primary emphasis.
+        final isComponent = entry.isComponent;
         _cachedLabel(
           entry.title,
-          color: scheme.onSurfaceVariant,
+          color: isComponent ? scheme.tertiary : scheme.onSurfaceVariant,
+          fontWeight: isComponent ? FontWeight.w500 : null,
           maxWidth: labelWidth - 36,
         ).paint(canvas, Offset(12, top + (_rowHeight - 11) / 2));
         sawChannelInGroup = true;
@@ -196,7 +197,9 @@ class _TimelinePainter extends CustomPainter {
           top + _rowHeight / 2,
         ),
         Paint()
-          ..color = scheme.outlineVariant
+          ..color = entry.isComponent
+              ? scheme.tertiaryContainer
+              : scheme.outlineVariant
           ..strokeWidth = 1.5,
       );
 

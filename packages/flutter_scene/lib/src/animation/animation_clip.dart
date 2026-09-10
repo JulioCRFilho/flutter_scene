@@ -252,9 +252,10 @@ class AnimationClip {
   ///
   /// Used by model hot reload after a subtree is swapped in place; the channel
   /// targets resolve by name, so they re-attach to the new nodes. Component
-  /// property snapshots for continuing channels are kept, so a rebind
-  /// mid-playback still restores the bind-time value rather than a
-  /// mid-playback one.
+  /// property snapshots are kept for continuing channels whose target nodes
+  /// are the same instances, so a rebind mid-playback still restores the
+  /// bind-time value rather than a mid-playback one; a rebind onto different
+  /// nodes snapshots the new components' authored values instead.
   void rebind(Node newTarget, {Animation? animation}) {
     if (animation != null) {
       _animation = animation;
@@ -285,11 +286,15 @@ class AnimationClip {
           // or an unregistered package type); like a missing node, skip.
           continue;
         }
-        // A rebind keeps the existing snapshot for a continuing property so
-        // a hot-reload mid-playback restores the bind-time value.
+        // A rebind keeps the existing snapshot only when the same component
+        // instance continues to be borrowed (a rebind onto the same nodes
+        // mid-playback must restore the bind-time value, not a mid-playback
+        // one). A different subtree brings a different component carrying
+        // its own authored value, so it is snapshotted fresh.
         PropertyValue? snapshot;
         for (final previous in previousComponentBindings) {
-          if (previous.componentType == componentType &&
+          if (identical(previous.node, channelTarget) &&
+              previous.componentType == componentType &&
               previous.propertyName == propertyName) {
             snapshot = previous.snapshot;
             break;

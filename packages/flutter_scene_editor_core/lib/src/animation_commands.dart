@@ -41,10 +41,25 @@ AnimationProperty _requireProperty(Map<String, Object?> params) {
   if (property.isEmpty) {
     throw CommandException(
       'Unknown animation property "$name" '
-      '(translation, rotation, or scale)',
+      '(translation, rotation, scale, weights, or componentProperty)',
     );
   }
   return property.first;
+}
+
+/// Validates the `componentType`/`componentProperty` params that pick one
+/// property of a node's component (for example `pointLight.intensity`) and
+/// returns them as a pair. Throws when either is missing.
+(String, String) _requireComponentProperty(Map<String, Object?> params) {
+  final componentType = optionalString(params, 'componentType');
+  final componentProperty = optionalString(params, 'componentProperty');
+  if (componentType == null || componentProperty == null) {
+    throw const CommandException(
+      'componentProperty channels need both "componentType" (for example '
+      '"pointLight") and "componentProperty" (for example "intensity")',
+    );
+  }
+  return (componentType, componentProperty);
 }
 
 /// The values-per-keyframe stride of [property]'s value slot (morph-weight
@@ -54,9 +69,22 @@ int _strideOf(AnimationProperty property) =>
 
 /// The per-keyframe float count of [channel]'s keyframes payload: the value
 /// stride, tripled for cubic channels whose rows carry tangent slots.
-int _layoutStrideOf(AnimationChannelSpec channel) =>
-    _strideOf(channel.property) *
-    (channel.interpolation == AnimationInterpolation.cubic ? 3 : 1);
+///
+/// Component property channels have no declared kind on the spec, so their
+/// stride is derived from the payload itself (total floats over keyframes).
+/// Returns `0` when the payload cannot establish one (missing, empty, or not
+/// yet authored), which callers treat as "no keyframes".
+int _layoutStrideOf(SceneDocument document, AnimationChannelSpec channel) {
+  if (channel.property != AnimationProperty.componentProperty) {
+    return _strideOf(channel.property) *
+        (channel.interpolation == AnimationInterpolation.cubic ? 3 : 1);
+  }
+  final times = document.payload(channel.timeline)?.bytes;
+  final values = document.payload(channel.keyframes)?.bytes;
+  if (times == null || values == null) return 0;
+  final keys = times.lengthInBytes ~/ 4;
+  return keys == 0 ? 0 : values.lengthInBytes ~/ 4 ~/ keys;
+}
 
 /// A channel's keyframes parsed out of the document's payloads: sorted times
 /// and one fixed-stride value list per time.
@@ -69,13 +97,41 @@ class _KeyframeData {
 
 const double _timeEpsilon = 1e-4;
 
+/// The optional params that pick one property of a node's component (for
+/// example `pointLight.intensity`) on the keyframe commands. Shared so every
+/// command's schema describes component channels identically.
+const List<ParamSpec> _componentChannelParams = [
+  ParamSpec(
+    name: 'componentType',
+    type: ParamType.string,
+    label: 'Component type',
+    required: false,
+    description:
+        'Component this channel drives when property is "componentProperty" '
+        '(for example "pointLight", "particleEmitter").',
+  ),
+  ParamSpec(
+    name: 'componentProperty',
+    type: ParamType.string,
+    label: 'Component property',
+    required: false,
+    description:
+        'Component property name when property is "componentProperty" (for '
+        'example "intensity", "color").',
+  ),
+];
+
 /// Reads [channel]'s keyframes from [document]. Returns empty data when the
 /// payloads are missing, which authors as a fresh channel on next write.
 _KeyframeData _readKeyframes(SceneDocument document, AnimationChannelSpec c) {
   final times = document.payload(c.timeline)?.bytes;
   final values = document.payload(c.keyframes)?.bytes;
   if (times == null || values == null) return _KeyframeData([], []);
-  final layoutStride = _layoutStrideOf(c);
+  final layoutStride = _layoutStrideOf(document, c);
+  // A payload without a derivable stride (a not-yet-authored component
+  // channel, or a structured-kind channel carrying its values elsewhere)
+  // reads as fresh: no keyframes.
+  if (layoutStride <= 0) return _KeyframeData([], []);
   Float32List floats(Uint8List bytes) {
     if (bytes.offsetInBytes % 4 == 0) {
       return bytes.buffer.asFloat32List(
@@ -117,15 +173,26 @@ _KeyframeData _readKeyframes(SceneDocument document, AnimationChannelSpec c) {
 }
 
 /// The channel of [animation] driving [property] of [target], or null.
+///
+/// For [AnimationProperty.componentProperty] channels, [componentType] and
+/// [componentProperty] discriminate which component property the channel
+/// drives, so two properties of the same node never merge into one channel.
 AnimationChannelSpec? _channelOf(
   AnimationSpec animation,
   LocalId target,
   AnimationProperty property, {
   String? targetName,
   bool memberTargeting = false,
+  String? componentType,
+  String? componentProperty,
 }) {
   for (final channel in animation.channels) {
     if (channel.target != target || channel.property != property) {
+      continue;
+    }
+    if (property == AnimationProperty.componentProperty &&
+        (channel.componentType != componentType ||
+            channel.componentProperty != componentProperty)) {
       continue;
     }
     // Member targeting (a bone inside an imported instance) discriminates
@@ -209,6 +276,8 @@ bool _payloadDiffers(PayloadSpec? payload, Uint8List bytes) {
   AnimationProperty property,
   _KeyframeData data, {
   bool memberTargeting = false,
+  String? componentType,
+  String? componentProperty,
 }) {
   final existing = _channelOf(
     animation,
@@ -216,6 +285,8 @@ bool _payloadDiffers(PayloadSpec? payload, Uint8List bytes) {
     property,
     targetName: targetName,
     memberTargeting: memberTargeting,
+    componentType: componentType,
+    componentProperty: componentProperty,
   );
   final (timesBytes, valuesBytes) = _encodeKeyframes(data);
 
@@ -273,6 +344,8 @@ bool _payloadDiffers(PayloadSpec? payload, Uint8List bytes) {
     target: target,
     targetName: targetName,
     property: property,
+    componentType: componentType,
+    componentProperty: componentProperty,
     timeline: timelineId,
     keyframes: keyframesId,
     // Rewriting a channel must never silently reset its interpolation.
@@ -290,6 +363,9 @@ bool _payloadDiffers(PayloadSpec? payload, Uint8List bytes) {
     final matches =
         c.target == target &&
         c.property == property &&
+        (property != AnimationProperty.componentProperty ||
+            (c.componentType == componentType &&
+                c.componentProperty == componentProperty)) &&
         (!memberTargeting || (c.targetName ?? '') == (targetName ?? ''));
     if (matches) {
       // Duplicate matches (surviving odd member renames) collapse into the
@@ -332,8 +408,14 @@ List<ChangeRecord> _removalRecords(
   ];
   final dropped = <LocalId>{};
   for (final channel in animation.channels) {
-    for (final id in [channel.timeline, channel.keyframes]) {
-      if (!dropped.add(id)) continue;
+    // Component property channels also own a serialized blob payload for
+    // their structured keyframe values.
+    for (final id in [
+      channel.timeline,
+      channel.keyframes,
+      channel.keyframesBlob,
+    ]) {
+      if (id == null || !dropped.add(id)) continue;
       records.add(
         ChangeRecord(
           targetId: id,
@@ -361,6 +443,8 @@ List<ChangeRecord>? _pruneChannelRecords(
         for (final c in animation.channels)
           if (c.target != channel.target ||
               c.property != channel.property ||
+              c.componentType != channel.componentType ||
+              c.componentProperty != channel.componentProperty ||
               (c.targetName ?? '') != (channel.targetName ?? ''))
             c,
       ]);
@@ -492,6 +576,17 @@ final setAnimationKeyframe = CommandEntry(
           'example a bone such as Bone_012). Omit for plain nodes.',
     ),
     ParamSpec(name: 'property', type: ParamType.string, label: 'Property'),
+    ..._componentChannelParams,
+    ParamSpec(
+      name: 'value',
+      type: ParamType.numberList,
+      label: 'Value',
+      required: false,
+      description:
+          'Float-encoded component property value (one float for a number or '
+          'boolean, three for a vec3, ...). Required for componentProperty '
+          'channels; transform channels ignore it.',
+    ),
     ParamSpec(name: 'time', type: ParamType.number, label: 'Time'),
     ParamSpec(
       name: 'translation',
@@ -535,6 +630,15 @@ final setAnimationKeyframe = CommandEntry(
     if (property == AnimationProperty.weights) {
       throw CommandException('Morph-weight keyframes are not authorable here');
     }
+    // Component property channels key the float-encoded value passed in
+    // "value": capturing a live component value would need the component
+    // schema, which these document-level commands do not carry, so the
+    // caller (the panel or an agent) reads it from the document instead.
+    String? componentType;
+    String? componentProperty;
+    if (property == AnimationProperty.componentProperty) {
+      (componentType, componentProperty) = _requireComponentProperty(params);
+    }
     final time = requireDouble(params, 'time');
     if (time.isNegative || time.isNaN) {
       throw CommandException('Keyframe time must be a non-negative number');
@@ -552,6 +656,8 @@ final setAnimationKeyframe = CommandEntry(
       property,
       targetName: targetName,
       memberTargeting: memberName != null,
+      componentType: componentType,
+      componentProperty: componentProperty,
     );
     final data = channel == null
         ? _KeyframeData([], [])
@@ -573,6 +679,8 @@ final setAnimationKeyframe = CommandEntry(
       property,
       data,
       memberTargeting: memberName != null,
+      componentType: componentType,
+      componentProperty: componentProperty,
     );
     return Transaction(name: 'Set keyframe', records: records);
   },
@@ -590,6 +698,24 @@ List<double> _keyValue(
 }) {
   if (property == AnimationProperty.weights) {
     throw CommandException('Morph-weight keyframes are not authorable here');
+  }
+  // Component property keyframes carry their float-encoded value verbatim;
+  // there is no pose to capture from (the node's transform is unrelated) and
+  // no tangent layout (component channels interpolate linearly or step-wise).
+  if (property == AnimationProperty.componentProperty) {
+    final raw = key['value'];
+    if (raw is! List || raw.isEmpty) {
+      throw const CommandException(
+        '"value" must be a non-empty list of numbers for componentProperty '
+        'channels',
+      );
+    }
+    for (final entry in raw) {
+      if (entry is! num) {
+        throw const CommandException('Every entry of "value" must be a number');
+      }
+    }
+    return [for (final entry in raw) (entry as num).toDouble()];
   }
   final quaternion = optionalQuaternion(key, 'rotation');
   final euler = optionalEuler(key, 'rotationEuler');
@@ -612,6 +738,7 @@ List<double> _keyValue(
         ...(optionalVec3(key, 'scale') ?? trs.scale).storage,
       ],
       AnimationProperty.weights => const [],
+      AnimationProperty.componentProperty => const [],
     },
     previousRow: previousRow,
     inTangent: _tangentOf(key, property, 'inTangent'),
@@ -730,14 +857,16 @@ final setAnimationKeyframes = CommandEntry(
           'example a bone such as Bone_012). Omit for plain nodes.',
     ),
     ParamSpec(name: 'property', type: ParamType.string, label: 'Property'),
+    ..._componentChannelParams,
     ParamSpec(
       name: 'keys',
       type: ParamType.objectList,
       label: 'Keys',
       description:
           'One {time, translation?, rotation?, rotationEuler?, scale?, '
-          'inTangent?, outTangent?} object per keyframe; times need not be '
-          'sorted. Tangent slots only apply to cubic channels.',
+          'value?, inTangent?, outTangent?} object per keyframe; times need '
+          'not be sorted. Tangent slots only apply to cubic channels; '
+          '"value" only to componentProperty channels.',
     ),
   ],
   execute: (ctx, params) {
@@ -750,6 +879,11 @@ final setAnimationKeyframes = CommandEntry(
         ctx.document.node(nodeId) ??
         (throw CommandException('Node not found: ${nodeId.toToken()}'));
     final property = _requireProperty(params);
+    String? componentType;
+    String? componentProperty;
+    if (property == AnimationProperty.componentProperty) {
+      (componentType, componentProperty) = _requireComponentProperty(params);
+    }
     final keysParam = params['keys'];
     if (keysParam is! List || keysParam.isEmpty) {
       throw const CommandException(
@@ -767,6 +901,8 @@ final setAnimationKeyframes = CommandEntry(
       property,
       targetName: targetName,
       memberTargeting: memberName != null,
+      componentType: componentType,
+      componentProperty: componentProperty,
     );
     final data = channel == null
         ? _KeyframeData([], [])
@@ -800,6 +936,8 @@ final setAnimationKeyframes = CommandEntry(
       property,
       data,
       memberTargeting: memberName != null,
+      componentType: componentType,
+      componentProperty: componentProperty,
     );
     return Transaction(name: 'Set keyframes', records: records);
   },
@@ -828,6 +966,7 @@ final removeAnimationKeyframe = CommandEntry(
           'example a bone such as Bone_012). Omit for plain nodes.',
     ),
     ParamSpec(name: 'property', type: ParamType.string, label: 'Property'),
+    ..._componentChannelParams,
     ParamSpec(name: 'time', type: ParamType.number, label: 'Time'),
   ],
   execute: (ctx, params) {
@@ -838,6 +977,11 @@ final removeAnimationKeyframe = CommandEntry(
     );
     final nodeId = requireNodeId(params, 'nodeId');
     final property = _requireProperty(params);
+    String? componentType;
+    String? componentProperty;
+    if (property == AnimationProperty.componentProperty) {
+      (componentType, componentProperty) = _requireComponentProperty(params);
+    }
     final time = requireDouble(params, 'time');
     final targetName = _effectiveTargetName(params, document, nodeId);
     final memberName = optionalString(params, 'targetName');
@@ -848,6 +992,8 @@ final removeAnimationKeyframe = CommandEntry(
           property,
           targetName: targetName,
           memberTargeting: memberName != null,
+          componentType: componentType,
+          componentProperty: componentProperty,
         ) ??
         (throw CommandException(
           'No ${property.name} channel on ${nodeId.toToken()}',
@@ -872,6 +1018,8 @@ final removeAnimationKeyframe = CommandEntry(
       property,
       data,
       memberTargeting: true,
+      componentType: componentType,
+      componentProperty: componentProperty,
     );
     return Transaction(name: 'Remove keyframe', records: records);
   },
@@ -898,6 +1046,7 @@ final moveAnimationKeyframe = CommandEntry(
           'example a bone such as Bone_012). Omit for plain nodes.',
     ),
     ParamSpec(name: 'property', type: ParamType.string, label: 'Property'),
+    ..._componentChannelParams,
     ParamSpec(name: 'fromTime', type: ParamType.number, label: 'From'),
     ParamSpec(name: 'toTime', type: ParamType.number, label: 'To'),
   ],
@@ -908,6 +1057,11 @@ final moveAnimationKeyframe = CommandEntry(
     );
     final nodeId = requireNodeId(params, 'nodeId');
     final property = _requireProperty(params);
+    String? componentType;
+    String? componentProperty;
+    if (property == AnimationProperty.componentProperty) {
+      (componentType, componentProperty) = _requireComponentProperty(params);
+    }
     final fromTime = requireDouble(params, 'fromTime');
     final toTime = requireDouble(params, 'toTime');
     if (toTime.isNegative || toTime.isNaN) {
@@ -923,6 +1077,8 @@ final moveAnimationKeyframe = CommandEntry(
           property,
           targetName: targetName,
           memberTargeting: memberName != null,
+          componentType: componentType,
+          componentProperty: componentProperty,
         ) ??
         (throw CommandException(
           'No ${property.name} channel on ${nodeId.toToken()}',
@@ -945,6 +1101,8 @@ final moveAnimationKeyframe = CommandEntry(
       property,
       data,
       memberTargeting: true,
+      componentType: componentType,
+      componentProperty: componentProperty,
     );
     return Transaction(name: 'Move keyframe', records: records);
   },
@@ -989,6 +1147,8 @@ Transaction _rewriteAnimation(
       // Whole-clip rewrites target each channel explicitly, so sibling
       // member channels of the same instance are preserved.
       memberTargeting: true,
+      componentType: channel.componentType,
+      componentProperty: channel.componentProperty,
     );
     records.addAll(channelRecords);
     working = updated;
@@ -1028,9 +1188,14 @@ final duplicateAnimation = CommandEntry(
     for (final channel in source.channels) {
       Uint8List copied(PayloadSpec? payload) => payload?.bytes == null
           ? Uint8List(0)
-          : Uint8List.fromList(payload!.bytes!);
+          : Uint8List.fromList(payload?.bytes as Uint8List);
       final timelineId = ctx.document.newId();
       final keyframesId = ctx.document.newId();
+      // Structured-key component channels own a third (bytes) payload.
+      final Uint8List? blobBytes = channel.keyframesBlob == null
+          ? null
+          : copied(ctx.document.payload(channel.keyframesBlob!));
+      final LocalId? blobId = blobBytes == null ? null : ctx.document.newId();
       records.addAll([
         ChangeRecord(
           targetId: timelineId,
@@ -1054,14 +1219,32 @@ final duplicateAnimation = CommandEntry(
             ),
           ),
         ),
+        if (blobId != null)
+          ChangeRecord(
+            targetId: blobId,
+            slot: ChangeSlot.poolPayload,
+            oldValue: const PayloadChange(null),
+            newValue: PayloadChange(
+              PayloadSpec(
+                blobId,
+                encoding: PayloadEncoding.bytes,
+                length: blobBytes!.lengthInBytes,
+                bytes: blobBytes,
+              ),
+            ),
+          ),
       ]);
       channels.add(
         AnimationChannelSpec(
           target: channel.target,
           targetName: channel.targetName,
           property: channel.property,
+          componentType: channel.componentType,
+          componentProperty: channel.componentProperty,
           timeline: timelineId,
           keyframes: keyframesId,
+          keyframesBlob: blobId,
+          interpolation: channel.interpolation,
         ),
       );
     }
@@ -1181,6 +1364,9 @@ final mirrorAnimationX = CommandEntry(
       // that includes both tangent slots, which are vectors in the same
       // space as the values.
       mapValue: (property, row) {
+        // Component property values have no mirror semantics; their rows
+        // pass through unchanged.
+        if (property == AnimationProperty.componentProperty) return row;
         final mapped = [...row];
         final stride = _strideOf(property);
         for (var base = 0; base + stride <= mapped.length; base += stride) {
@@ -1226,6 +1412,7 @@ final setChannelInterpolation = CommandEntry(
           'example a bone such as Bone_012). Omit for plain nodes.',
     ),
     ParamSpec(name: 'property', type: ParamType.string, label: 'Property'),
+    ..._componentChannelParams,
     ParamSpec(
       name: 'interpolation',
       type: ParamType.string,
@@ -1240,6 +1427,11 @@ final setChannelInterpolation = CommandEntry(
     );
     final nodeId = requireNodeId(params, 'nodeId');
     final property = _requireProperty(params);
+    String? componentType;
+    String? componentProperty;
+    if (property == AnimationProperty.componentProperty) {
+      (componentType, componentProperty) = _requireComponentProperty(params);
+    }
     final modeName = requireString(params, 'interpolation');
     AnimationInterpolation? mode;
     for (final value in AnimationInterpolation.values) {
@@ -1248,6 +1440,13 @@ final setChannelInterpolation = CommandEntry(
     if (mode == null && modeName != 'linear') {
       throw CommandException(
         'Unknown interpolation "$modeName" (linear, step, or cubic)',
+      );
+    }
+    if (property == AnimationProperty.componentProperty &&
+        mode == AnimationInterpolation.cubic) {
+      throw const CommandException(
+        'Component property channels interpolate linearly or step-wise; '
+        'cubic tangent rows are not authored for them',
       );
     }
     final memberName = optionalString(params, 'targetName');
@@ -1260,6 +1459,8 @@ final setChannelInterpolation = CommandEntry(
           property,
           targetName: targetName,
           memberTargeting: memberName != null,
+          componentType: componentType,
+          componentProperty: componentProperty,
         ) ??
         (throw CommandException(
           'No ${property.name} channel on ${nodeId.toToken()}',
@@ -1305,6 +1506,8 @@ final setChannelInterpolation = CommandEntry(
             target: c.target,
             targetName: c.targetName,
             property: c.property,
+            componentType: c.componentType,
+            componentProperty: c.componentProperty,
             timeline: c.timeline,
             keyframes: c.keyframes,
             // Linear is the default and encodes as absent; step and cubic
@@ -1423,6 +1626,7 @@ final removeChannel = CommandEntry(
           '(for example a bone such as Bone_012). Omit for plain nodes.',
     ),
     ParamSpec(name: 'property', type: ParamType.string, label: 'Property'),
+    ..._componentChannelParams,
   ],
   execute: (ctx, params) {
     final document = ctx.document;
@@ -1432,6 +1636,11 @@ final removeChannel = CommandEntry(
     );
     final nodeId = requireNodeId(params, 'nodeId');
     final property = _requireProperty(params);
+    String? componentType;
+    String? componentProperty;
+    if (property == AnimationProperty.componentProperty) {
+      (componentType, componentProperty) = _requireComponentProperty(params);
+    }
     final memberName = optionalString(params, 'targetName');
     final targetName =
         memberName ?? _effectiveTargetName(params, document, nodeId);
@@ -1442,6 +1651,8 @@ final removeChannel = CommandEntry(
           property,
           targetName: targetName,
           memberTargeting: memberName != null,
+          componentType: componentType,
+          componentProperty: componentProperty,
         ) ??
         (throw CommandException(
           'No ${property.name} channel on ${nodeId.toToken()}',
@@ -1568,6 +1779,7 @@ final keyPose = CommandEntry(
           AnimationProperty.rotation => [...trs.rotation.storage],
           AnimationProperty.scale => [...trs.scale.storage],
           AnimationProperty.weights => const <double>[],
+          AnimationProperty.componentProperty => const <double>[],
         };
         final value = _layoutRow(
           channel?.interpolation,

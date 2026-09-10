@@ -29,6 +29,9 @@ enum ParamType {
   /// A floating-point number.
   number,
 
+  /// A list of numbers (float-encoded component property keyframe values).
+  numberList,
+
   /// A 3-component vector `{x, y, z}`.
   vec3,
 
@@ -221,6 +224,12 @@ Map<String, Object> _paramJsonSchema(ParamSpec param) {
       return {'type': 'integer', 'description': param.description};
     case ParamType.number:
       return {'type': 'number', 'description': param.description};
+    case ParamType.numberList:
+      return {
+        'type': 'array',
+        'description': param.description,
+        'items': {'type': 'number'},
+      };
     case ParamType.vec3:
       return {
         ...object({'x': number, 'y': number, 'z': number}, ['x', 'y', 'z']),

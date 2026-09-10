@@ -616,7 +616,10 @@ void main() {
       final animation = h.doc.animations[animationId]!;
       for (final node in [a, b]) {
         for (final property in AnimationProperty.values) {
-          if (property == AnimationProperty.weights) continue;
+          if (property == AnimationProperty.weights ||
+              property == AnimationProperty.componentProperty) {
+            continue;
+          }
           final (times, values) = _channelData(
             h.doc,
             animation,

@@ -117,6 +117,19 @@ class _AnimationTimelineState extends State<AnimationTimeline> {
     return bound ? bindingName : '$bindingName · unbound';
   }
 
+  /// Renders a channel's lane label. Transform lanes show the property
+  /// (translation/rotation/scale); component property lanes show their
+  /// component type and property (for example `pointLight.intensity`) so two
+  /// properties of one component read apart under the node header.
+  String _laneTitle(AnimationChannelSpec channel) {
+    if (channel.property != AnimationProperty.componentProperty) {
+      return channel.property.name;
+    }
+    final type = channel.componentType ?? 'component';
+    final property = channel.componentProperty ?? 'property';
+    return '$type.$property';
+  }
+
   EditorController get controller => widget.controller;
   AnimationSpec get animation => widget.animation;
 
@@ -159,6 +172,8 @@ class _AnimationTimelineState extends State<AnimationTimeline> {
       AnimationProperty.rotation => 1,
       AnimationProperty.scale => 2,
       AnimationProperty.weights => 3,
+      // Component property lanes follow the transform lanes of their node.
+      AnimationProperty.componentProperty => 4,
     };
     for (final bucket in channelIndexesByNode.values) {
       bucket.sort((a, b) {
@@ -180,14 +195,18 @@ class _AnimationTimelineState extends State<AnimationTimeline> {
           groupChannels: [
             for (final i in channelIndexesByNode[node]!) animation.channels[i],
           ],
+          isComponent: false,
         ),
         for (final i in channelIndexesByNode[node]!)
           (
             isHeader: false,
-            title: animation.channels[i].property.name,
+            title: _laneTitle(animation.channels[i]),
             times: channelTimes(document, animation.channels[i]),
             channel: animation.channels[i],
             groupChannels: null,
+            isComponent:
+                animation.channels[i].property ==
+                AnimationProperty.componentProperty,
           ),
       ],
     ];

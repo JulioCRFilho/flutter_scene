@@ -19,12 +19,16 @@ typedef TimelineKey = ({
 /// channel's keyframe lane beneath it. Headers carry only a display title
 /// plus the group's channels (for the header-row interpolation control);
 /// lanes additionally carry their channel and its keyframe times.
+/// [isComponent] marks a lane driving a component property (a particle
+/// emitter or light field rather than a transform), which the painter
+/// renders with distinct chrome.
 typedef _LaneRow = ({
   bool isHeader,
   String title,
   List<double>? times,
   AnimationChannelSpec? channel,
   List<AnimationChannelSpec>? groupChannels,
+  bool isComponent,
 });
 
 /// Pure view-state math behind [AnimationTimeline]: how the user's zoom and

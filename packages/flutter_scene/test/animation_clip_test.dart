@@ -4,11 +4,14 @@
 /// and `loop = true`.
 library;
 
+import 'dart:typed_data';
+
 import 'package:flutter_scene/scene.dart';
 // The channel/resolver data model is internal; tests reach it directly.
 // ignore: implementation_imports
 import 'package:flutter_scene/src/animation.dart'
-    show AnimationChannel, BindKey, PropertyResolver;
+    show AnimationChannel, AnimationProperty, BindKey, PropertyResolver;
+import 'package:scene/schema.dart' show ComponentPropertyKind;
 import 'package:test/test.dart';
 import 'package:vector_math/vector_math.dart';
 
@@ -252,6 +255,85 @@ void main() {
     });
   });
 
+  group('component property lifecycle', () {
+    test('snapshot restores a changed PointLight intensity on stop', () {
+      final light = PointLightComponent(PointLight(intensity: 1.5));
+      final lightNode = Node(name: 'light')..addComponent(light);
+      expect(light.light.intensity, 1.5);
+
+      final clip = _makeIntensityClip(lightNode);
+      clip.play();
+      clip.advance(1.0);
+      clip.applyToBindings({}, 1.0);
+      expect(light.light.intensity, closeTo(0.0, 1e-6));
+
+      clip.stop();
+      expect(light.light.intensity, 1.5);
+    });
+
+    test('weight 0 restores the authored value between frames', () {
+      final light = PointLightComponent(PointLight(intensity: 1.5));
+      final lightNode = Node(name: 'light')..addComponent(light);
+      final clip = _makeIntensityClip(lightNode);
+
+      clip.play();
+      clip.advance(1.0);
+      clip.applyToBindings({}, 1.0);
+      expect(light.light.intensity, closeTo(0.0, 1e-6));
+
+      clip.weight = 0.0;
+      clip.applyToBindings({}, 1.0);
+      expect(light.light.intensity, 1.5);
+
+      clip.weight = 1.0;
+      clip.applyToBindings({}, 1.0);
+      expect(light.light.intensity, closeTo(0.0, 1e-6));
+    });
+
+    test('multiple component properties restore independently', () {
+      final light = PointLightComponent(
+        PointLight(intensity: 1.5, color: Vector3(0, 1, 0)),
+      );
+      final lightNode = Node(name: 'light')..addComponent(light);
+      final clip = _makeMultiPropertyClip(lightNode);
+
+      clip.play();
+      clip.advance(1.0);
+      clip.applyToBindings({}, 1.0);
+      expect(light.light.intensity, closeTo(0.0, 1e-6));
+      expect(light.light.color.x, closeTo(1.0, 1e-6));
+      expect(light.light.color.y, closeTo(0.0, 1e-6));
+
+      clip.stop();
+      expect(light.light.intensity, 1.5);
+      expect(light.light.color.x, closeTo(0.0, 1e-6));
+      expect(light.light.color.y, closeTo(1.0, 1e-6));
+    });
+
+    test('rebind onto a new subtree restores the new snapshot', () {
+      final lightA = PointLightComponent(PointLight(intensity: 3.0));
+      final nodeA = Node(name: 'light')..addComponent(lightA);
+      final clip = _makeIntensityClip(nodeA);
+      clip.play();
+      clip.advance(1.0);
+      clip.applyToBindings({}, 1.0);
+      expect(lightA.light.intensity, closeTo(0.0, 1e-6));
+
+      final lightB = PointLightComponent(PointLight(intensity: 7.0));
+      final rig = Node(name: 'rig')
+        ..add(Node(name: 'light')..addComponent(lightB));
+      clip.rebind(rig);
+      clip.applyToBindings({}, 1.0);
+      expect(lightB.light.intensity, closeTo(0.0, 1e-6));
+
+      clip.stop();
+      expect(lightB.light.intensity, 7.0);
+      // The detached light keeps the last animated value — the clip's
+      // restored snapshot belongs to the rebound subtree now.
+      expect(lightA.light.intensity, closeTo(0.0, 1e-6));
+    });
+  });
+
   group('zero-bind diagnostic', () {
     test('throws when every channel targets a missing node', () {
       final root = Node(name: 'root')..add(Node(name: 'hip'));
@@ -299,3 +381,60 @@ void main() {
     });
   });
 }
+
+// ---------------------------------------------------------------------------
+// Component property helpers.
+// ---------------------------------------------------------------------------
+
+/// The `pointLight` `intensity` channel: drives [node]'s attached
+/// [PointLightComponent] intensity from 1.5 down to 0 over one second.
+AnimationChannel _pointLightIntensityChannel(Node node) => AnimationChannel(
+  bindTarget: BindKey(
+    nodeName: node.name,
+    property: AnimationProperty.componentProperty,
+    componentType: 'pointLight',
+    componentProperty: 'intensity',
+  ),
+  resolver: PropertyResolver.makeComponentPropertyTimeline(
+    [0.0, 1.0],
+    Float32List.fromList([1.5, 0.0]),
+    kind: ComponentPropertyKind.number,
+    componentType: 'pointLight',
+    propertyName: 'intensity',
+  ),
+);
+
+/// A clip with a single point-light intensity channel on [node].
+AnimationClip _makeIntensityClip(Node node) => node.createAnimationClip(
+  Animation(
+    name: 'intensity-test',
+    channels: [_pointLightIntensityChannel(node)],
+  ),
+);
+
+/// A clip driving two properties of [node]'s point light at once — intensity
+/// `1.5 → 0` and color `green → red` — covering two bindings of one codec on
+/// the same node.
+AnimationClip _makeMultiPropertyClip(Node node) => node.createAnimationClip(
+  Animation(
+    name: 'multi-property',
+    channels: [
+      _pointLightIntensityChannel(node),
+      AnimationChannel(
+        bindTarget: BindKey(
+          nodeName: node.name,
+          property: AnimationProperty.componentProperty,
+          componentType: 'pointLight',
+          componentProperty: 'color',
+        ),
+        resolver: PropertyResolver.makeComponentPropertyTimeline(
+          [0.0, 1.0],
+          Float32List.fromList([0.0, 1.0, 0.0, 1.0, 0.0, 0.0]),
+          kind: ComponentPropertyKind.vec3,
+          componentType: 'pointLight',
+          propertyName: 'color',
+        ),
+      ),
+    ],
+  ),
+);

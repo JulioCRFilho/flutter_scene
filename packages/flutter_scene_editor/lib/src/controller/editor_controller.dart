@@ -28,6 +28,7 @@ import 'package:flutter/scheduler.dart' show Ticker;
 import 'package:flutter/services.dart' show CachingAssetBundle;
 import 'package:flutter_scene/scene.dart';
 import 'package:scene/scene.dart' hide NodeChange;
+import 'package:flutter_scene/src/animation.dart' as engine;
 import 'package:flutter_scene/src/fmat/material_registry.dart'
     show fmatSourcePathOf;
 import 'package:flutter_scene/src/fscene/realize/component_codec.dart';
@@ -946,9 +947,26 @@ class EditorController extends ChangeNotifier
     for (final entry in _prePreviewMemberTransforms.entries) {
       applyTransformSpec(entry.key, entry.value);
     }
+    // Component properties an animation preview touched go back to their
+    // captured live values; there is no document-driven restore for these
+    // (prefab members have no document spec to read from either).
+    for (final entry in _prePreviewComponentProperties.entries) {
+      final live = _liveById[entry.key];
+      if (live == null) continue;
+      for (final property in entry.value.entries) {
+        final dot = property.key.indexOf('.');
+        _writeComponentProperty(
+          live,
+          property.key.substring(0, dot),
+          property.key.substring(dot + 1),
+          property.value,
+        );
+      }
+    }
     if (!keepCaptures) {
       _prePreviewTransforms.clear();
       _prePreviewMemberTransforms.clear();
+      _prePreviewComponentProperties.clear();
     }
   }
 
@@ -965,7 +983,9 @@ class EditorController extends ChangeNotifier
   /// Evaluates [spec] at [t] and writes the result onto the live nodes each
   /// channel targets. Nodes missing from the live graph (deleted, or inside
   /// an unrealized prefab) are skipped; morph-weight channels are not
-  /// authored in the editor and are ignored here.
+  /// authored in the editor and are ignored here. `componentProperty`
+  /// channels are applied through the engine's component-property resolvers
+  /// and restored on stop ([_applyComponentPropertyPose]).
   void _applyPose(AnimationSpec spec, double t) {
     for (final channel in spec.channels) {
       var live = _liveById[channel.target];
@@ -995,6 +1015,10 @@ class EditorController extends ChangeNotifier
         }
         live = member;
       }
+      if (channel.property == AnimationProperty.componentProperty) {
+        _applyComponentPropertyPose(channel, live, t);
+        continue;
+      }
       final times = _payloadFloats(channel.timeline);
       final values = _payloadFloats(channel.keyframes);
       final stride = channel.property == AnimationProperty.rotation ? 4 : 3;
@@ -1022,7 +1046,127 @@ class EditorController extends ChangeNotifier
           live.scale = Vector3(sampled[0], sampled[1], sampled[2]);
           break;
         case AnimationProperty.weights:
+        case AnimationProperty.componentProperty:
           break;
+      }
+    }
+  }
+
+  /// Applies one `componentProperty` channel at [t] onto the live component
+  /// [liveNode] targets, borrowing the engine's own component-property
+  /// resolver so the preview plays exactly what the runtime will play —
+  /// including blob-encoded structured kinds (curves, gradients, ...),
+  /// which evaluate through the channel's `keyframesBlob` payload. The
+  /// component's pre-preview value is captured once (restored on
+  /// [stopPreview]); writes go through the codec's live bindings and never
+  /// touch the document.
+  void _applyComponentPropertyPose(
+    AnimationChannelSpec channel,
+    Node liveNode,
+    double t,
+  ) {
+    final componentType = channel.componentType;
+    final propertyName = channel.componentProperty;
+    if (componentType == null || propertyName == null) return;
+    final codec = _componentRegistry.codecFor(componentType);
+    if (codec == null) return;
+    ComponentPropertyDef? def;
+    for (final candidate in codec.propertySchema) {
+      if (candidate.name == propertyName) {
+        def = candidate;
+        break;
+      }
+    }
+    if (def == null) return;
+    // Component channels are never authored cubic (tangent rows are not
+    // laid out for them), so a cubic channel resolves as linear — matching
+    // the runtime resolver.
+    final resolver =
+        engine.PropertyResolver.makeComponentPropertyTimeline(
+              _payloadFloats(channel.timeline).toList(),
+              _payloadFloats(channel.keyframes),
+              kind: def.kind,
+              componentType: componentType,
+              propertyName: propertyName,
+              keyframesBlobPayload: channel.keyframesBlob == null
+                  ? null
+                  : document.payload(channel.keyframesBlob!)?.bytes,
+            )
+            as engine.ComponentPropertyResolver;
+    _captureComponentPropertyIfNeeded(
+      channel.target,
+      liveNode,
+      codec,
+      componentType,
+      propertyName,
+    );
+    _writeComponentProperty(
+      liveNode,
+      componentType,
+      propertyName,
+      resolver.evaluate(t, 1.0),
+    );
+  }
+
+  /// Pre-preview values of component properties touched by a previewing
+  /// animation, keyed by the channel's document node id and then by
+  /// `componentType.propertyName`. Captured from the live component (prefab
+  /// members have no document spec), restored on stop.
+  final Map<LocalId, Map<String, PropertyValue>>
+  _prePreviewComponentProperties = {};
+
+  void _captureComponentPropertyIfNeeded(
+    LocalId nodeId,
+    Node liveNode,
+    ComponentCodec codec,
+    String componentType,
+    String propertyName,
+  ) {
+    final key = '$componentType.$propertyName';
+    final captured = _prePreviewComponentProperties[nodeId];
+    if (captured != null && captured.containsKey(key)) return;
+    final component = _componentOwnedBy(liveNode, codec);
+    if (component == null) return;
+    final spec = codec.serialize(component, SerializeContext(document));
+    // A property serialized at its default is absent from the spec; the
+    // declared default is the effective pre-preview value (matching the
+    // engine's bind-time snapshot).
+    (_prePreviewComponentProperties[nodeId] ??= {})[key] =
+        spec?.properties[propertyName] ??
+        codec.defaultOf(propertyName) ??
+        const DoubleValue(0);
+  }
+
+  /// The component on [node] that [codec] owns, or null when none matches.
+  Component? _componentOwnedBy(Node node, ComponentCodec codec) {
+    for (final component in node.getComponents<Component>()) {
+      if (codec.claims(component)) return component;
+      if (codec.componentType != Component &&
+          component.runtimeType == codec.componentType) {
+        return component;
+      }
+    }
+    return null;
+  }
+
+  /// Writes one component property straight onto [liveNode]'s component the
+  /// codec owns, through the codec's live write bindings. A no-op when no
+  /// codec is registered for [componentType] or none of the node's
+  /// components match.
+  void _writeComponentProperty(
+    Node liveNode,
+    String componentType,
+    String name,
+    PropertyValue value,
+  ) {
+    final codec = _componentRegistry.codecFor(componentType);
+    if (codec == null) return;
+    final context = RealizeContext(document, resources: _resourceRealizer)
+      ..resolveNode = (nodeId) => _liveById[nodeId];
+    for (final component in liveNode.getComponents<Component>()) {
+      if (codec.writeLiveProperty(component, name, value, context)) {
+        previewEpoch.value++;
+        return;
       }
     }
   }
@@ -1631,18 +1775,8 @@ class EditorController extends ChangeNotifier
     PropertyValue value,
   ) {
     final live = _liveById[id];
-    final realizer = _resourceRealizer;
-    if (live == null || realizer == null) return;
-    final codec = _componentRegistry.codecFor(componentType);
-    if (codec == null) return;
-    final context = RealizeContext(document, resources: realizer)
-      ..resolveNode = (nodeId) => _liveById[nodeId];
-    for (final component in live.getComponents<Component>()) {
-      if (codec.writeLiveProperty(component, name, value, context)) {
-        previewEpoch.value++;
-        return;
-      }
-    }
+    if (live == null) return;
+    _writeComponentProperty(live, componentType, name, value);
   }
 
   /// Live-previews a material factor on node [id]'s realized mesh without
