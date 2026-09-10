@@ -1127,14 +1127,19 @@ class EditorController extends ChangeNotifier
     if (captured != null && captured.containsKey(key)) return;
     final component = _componentOwnedBy(liveNode, codec);
     if (component == null) return;
-    final spec = codec.serialize(component, SerializeContext(document));
+    // Serialize into a scratch document: a codec's serialize may mint ids or
+    // add payloads (mesh geometry does), which must never land in the real
+    // document as a side effect of a preview capture. This mirrors the
+    // engine's bind-time snapshot, which does the same.
+    final spec = codec.serialize(component, SerializeContext(SceneDocument()));
     // A property serialized at its default is absent from the spec; the
     // declared default is the effective pre-preview value (matching the
-    // engine's bind-time snapshot).
-    (_prePreviewComponentProperties[nodeId] ??= {})[key] =
-        spec?.properties[propertyName] ??
-        codec.defaultOf(propertyName) ??
-        const DoubleValue(0);
+    // engine's bind-time snapshot). With neither, there is nothing to
+    // restore to — skip the capture rather than guess a value.
+    final value =
+        spec?.properties[propertyName] ?? codec.defaultOf(propertyName);
+    if (value == null) return;
+    (_prePreviewComponentProperties[nodeId] ??= {})[key] = value;
   }
 
   /// The component on [node] that [codec] owns, or null when none matches.

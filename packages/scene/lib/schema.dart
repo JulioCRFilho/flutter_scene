@@ -9,6 +9,7 @@ export 'src/schema/component_schema.dart'
         ComponentPropertyDef,
         ComponentPropertyKind,
         ComponentSchema,
+        componentPropertyFloatStride,
         decodeComponentSchemas,
         encodeComponentSchemas;
 export 'src/schema/gizmo_spec.dart'

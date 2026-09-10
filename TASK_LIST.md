@@ -76,36 +76,77 @@ Extend the flutter_scene animation system to support animating component propert
 
 ### 7. Add component property lanes to Animation panel UI
 **Files**: `packages/flutter_scene_editor/lib/src/panels/animation_panel.dart`
-**Status**: ⏳ Pending
-**Changes needed**:
-- Detect component properties available on selected node
-- Add "Add component property channel" UI (pick component type → pick property)
-- Render component property lanes in timeline (different color/icon from TRS)
-- Show keyframes on component property lanes
-- Click keyframe → open appropriate value editor (float row, curve, gradient, distribution, etc.)
+**Status**: ✅ Complete
+**Changes**:
+- Component property lanes render in the timeline (distinct from TRS lanes)
+- Lane double-tap keys the float-encoded value read from the document
+- Prefab-member lanes key through `targetName` on the enclosing instance
 
 ---
 
 ### 8. Wire keyframe commands for component properties
 **Files**: `packages/flutter_scene_editor_core/lib/src/animation_commands.dart`
-**Status**: ⏳ Pending
-**Changes needed**:
-- Add `setComponentAnimationKeyframes` command
-- Add `addComponentAnimationChannel` command
-- Commands mirror existing TRS keyframe commands but target component properties
-- Undo/redo support through existing command infrastructure
+**Status**: ✅ Complete
+**Changes**:
+- The existing TRS keyframe commands were extended rather than duplicated:
+  `property: "componentProperty"` + `componentType`/`componentProperty`
+  params, `value` (float list), undoable through the transaction infra
 
 ---
 
-### 7. Add component property lanes to Animation panel UI
-**Files**: `packages/flutter_scene_editor/lib/src/panels/animation_panel.dart`
+## Review Follow-ups (quality pass, 2026-09-10)
+
+Found while reviewing the shipped feature. Each is independently shippable.
+
+### R1. Validate component keyframe values against the declared schema
+**Files**: `packages/scene/lib/src/schema/component_schema.dart`,
+`packages/flutter_scene/lib/src/animation/property_resolver.dart`,
+`packages/flutter_scene_editor_core/lib/src/animation_commands.dart`,
+`packages/flutter_scene_editor_core/test/animation_command_test.dart`
 **Status**: ⏳ Pending
-**Changes needed**:
-- Detect component properties available on selected node
-- Add "Add component property channel" UI (pick component type → pick property)
-- Render component property lanes in timeline (different color/icon from TRS)
-- Show keyframes on component property lanes
-- Click keyframe → open appropriate value editor (float row, curve, gradient, distribution, etc.)
+**Context**: The keyframe commands accept any non-empty numeric `value`
+list because document-level commands carry no component schema knowledge.
+The host *does* provide one (`CommandContext.componentSchema`), but only
+the component commands use it. Consequences for an agent keying a
+component property blindly:
+- A **structured kind** (distribution, curve, gradient, object, union,
+  string — anything outside `componentPropertyFloatStride`) has its values
+  carried in the channel's `keyframesBlob` payload, not the float payload.
+  The command silently writes floats that playback ignores, and the stale
+  blob wins — a no-op key that looks like it worked.
+- A **wrongly-sized float row** (say 3 floats for a color) mis-frames the
+  payload: `_layoutStrideOf` derives the stride from the payload, so one
+  bad key reframes every other keyframe of the channel.
+**Plan**:
+- Move `componentPropertyFloatStride` into `scene` (next to
+  `ComponentPropertyKind`, whose doc comment already calls it "the
+  serialization contract shared by the scene serializer, the editor
+  keyframe commands, and the animation resolvers") so editor_core — which
+  depends on `scene` only — uses the one true copy.
+- In `setAnimationKeyframe`/`setAnimationKeyframes`, when
+  `ctx.componentSchema` resolves the kind: float-encodable kinds require
+  `value.length == stride`; structured kinds are rejected with an error
+  that names the limitation.
+- No schema lookup / unknown type / unknown property keeps the current
+  shape-guessing fallback (the host decides what is registered).
+**Acceptance**: command tests with a schema-backed harness (stride
+mismatch + structured kind + schemaless fallback).
+
+---
+
+### R2. Guard legacy cubic component channels in `_layoutRow`
+**Files**: `packages/flutter_scene_editor_core/lib/src/animation_commands.dart`
+**Status**: ⏳ Pending
+**Context**: Component channels are never authored cubic (tangent rows
+are not laid out for them; `setChannelInterpolation` rejects it and the
+runtime resolver treats a cubic component channel as linear). But a
+hand-crafted or legacy document can carry one, and `_layoutRow` builds
+`stride 3 × 3` rows for non-rotation cubic channels — corrupting the
+component channel's payload layout on re-key.
+**Plan**: `_layoutRow` returns the logical row verbatim for
+`componentProperty` (the linear layout is the one playback reads).
+**Acceptance**: a command test re-keying a cubic component channel keeps
+the payload row width the value's own.
 
 ---
 

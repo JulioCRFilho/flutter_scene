@@ -88,6 +88,35 @@ enum ComponentPropertyKind {
   gradient,
 }
 
+/// The float count one keyframe occupies for float-encodable component
+/// property kinds, or null when the kind is carried as a serialized value
+/// blob instead.
+///
+/// This is the serialization contract shared by the scene serializer, the
+/// editor keyframe commands, and the animation resolvers. Layouts match
+/// [encodePropertyValue]: color is four linear RGBA doubles, quaternion is
+/// `(x, y, z, w)`, and matrix4 is row-major 16-float storage.
+int? componentPropertyFloatStride(ComponentPropertyKind kind) {
+  switch (kind) {
+    case ComponentPropertyKind.boolean:
+    case ComponentPropertyKind.integer:
+    case ComponentPropertyKind.number:
+      return 1;
+    case ComponentPropertyKind.vec2:
+      return 2;
+    case ComponentPropertyKind.vec3:
+      return 3;
+    case ComponentPropertyKind.vec4:
+    case ComponentPropertyKind.quaternion:
+    case ComponentPropertyKind.color:
+      return 4;
+    case ComponentPropertyKind.matrix4:
+      return 16;
+    default:
+      return null;
+  }
+}
+
 /// A declared, editable property of a component type: the single source of
 /// truth for its name, carried kind, default, constraints, and docs.
 class ComponentPropertyDef {
