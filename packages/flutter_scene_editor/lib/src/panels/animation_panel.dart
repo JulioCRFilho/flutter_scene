@@ -213,6 +213,13 @@ class _AnimationPanelState extends State<AnimationPanel> {
   Future<void> _keySelection(AnimationProperty? property) async {
     final id = _animationId;
     if (id == null) return;
+    // A component property selected in the outliner redirects the Key button:
+    // the playhead capture records that property's authored document value,
+    // not a transform pose.
+    if (property == null && _controller.hasActiveComponent) {
+      await _keyActiveComponent(id);
+      return;
+    }
     final time = _controller.previewTime;
     final targets = _keyTargetNodes();
 
@@ -707,7 +714,11 @@ class _AnimationPanelState extends State<AnimationPanel> {
         // document (what the inspector shows): the authored value, not a pose.
         params['componentType'] = channel.componentType;
         params['componentProperty'] = channel.componentProperty;
-        final value = _componentValueFor(channel);
+        final value = _componentValueFor(
+          channel.target,
+          channel.componentType,
+          channel.componentProperty,
+        );
         if (value == null) {
           _showError(
             StateError(
@@ -740,18 +751,95 @@ class _AnimationPanelState extends State<AnimationPanel> {
     }
   }
 
-  /// The float-encoded authored value of [channel]'s component property, read
-  /// from the document (the value the inspector shows), or null when the
-  /// node, component, or property has no serialized value yet. The document
-  /// serializes only values that differ from the component's default, so a
-  /// property sitting at its default reads null — callers surface that as a
-  /// captured-nothing error rather than keying a wrongly-sized row of zeros.
-  List<double>? _componentValueFor(AnimationChannelSpec channel) {
-    final node = _controller.document.node(channel.target);
-    if (node == null) return null;
+  /// Keying path for an outliner-selected component property: records the
+  /// node's authored property value at the playhead (there is no pose to
+  /// capture — the component value lives in the document). A fresh channel
+  /// also seeds crystals at the clip's start and end so the property holds
+  /// across the whole playthrough, mirroring [_ensureEdgeKeys] for transform
+  /// channels.
+  Future<void> _keyActiveComponent(LocalId id) async {
+    final controller = _controller;
+    final nodeId = controller.activeComponentNodeId;
+    final type = controller.activeComponentType;
+    final property = controller.activeComponentProperty;
+    if (nodeId == null || type == null || property == null) return;
+    final time = controller.previewTime;
+    final value = _componentValueFor(nodeId, type, property);
+    if (value == null) {
+      _showError(
+        StateError(
+          'No authored $type.$property value to key on '
+          '${nodeId.toToken()}; change the property in the inspector first '
+          '(only values stored in the document can be captured).',
+        ),
+      );
+      return;
+    }
+    Map<String, Object?> keyParams(double at) => {
+      'animationId': id.toToken(),
+      'nodeId': nodeId.toToken(),
+      'property': AnimationProperty.componentProperty.name,
+      'componentType': type,
+      'componentProperty': property,
+      'value': value,
+      'time': at,
+    };
+    final commands = <(String, Map<String, Object?>)>[
+      ('setAnimationKeyframe', keyParams(time)),
+    ];
+    if (!_componentChannelExists(id, nodeId, type, property)) {
+      var end = controller.previewDuration(id);
+      if (end <= 1e-4) end = 1.0;
+      for (final edge in {0.0, end}) {
+        if ((edge - time).abs() <= 1e-3) continue;
+        commands.add(('setAnimationKeyframe', keyParams(edge)));
+      }
+    }
+    try {
+      await controller.runAll(commands);
+    } on Exception catch (error) {
+      _showError(error);
+    }
+  }
+
+  /// Whether [nodeId]'s `type.property` component channel already exists on
+  /// animation [id].
+  bool _componentChannelExists(
+    LocalId id,
+    LocalId nodeId,
+    String type,
+    String property,
+  ) {
+    final spec = _controller.document.animations[id];
+    if (spec == null) return false;
+    return spec.channels.any(
+      (c) =>
+          c.property == AnimationProperty.componentProperty &&
+          c.target == nodeId &&
+          c.componentType == type &&
+          c.componentProperty == property,
+    );
+  }
+
+  /// The float-encoded authored value of [nodeId]'s `componentType.
+  /// componentProperty`, read from the document (the value the inspector
+  /// shows), or null when the node, component, or property has no serialized
+  /// value yet. The document serializes only values that differ from the
+  /// component's default, so a property sitting at its default reads null —
+  /// callers surface that as a captured-nothing error rather than keying a
+  /// wrongly-sized row of zeros.
+  List<double>? _componentValueFor(
+    LocalId nodeId,
+    String? componentType,
+    String? componentProperty,
+  ) {
+    final node = _controller.document.node(nodeId);
+    if (node == null || componentType == null || componentProperty == null) {
+      return null;
+    }
     for (final component in node.components) {
-      if (component.type != channel.componentType) continue;
-      final value = component.properties[channel.componentProperty ?? ''];
+      if (component.type != componentType) continue;
+      final value = component.properties[componentProperty];
       if (value == null) return null;
       return _floatSlots(value);
     }
@@ -1053,16 +1141,20 @@ class _AnimationPanelState extends State<AnimationPanel> {
           ),
           const SizedBox(width: 6),
           _PanelTip(
-            message:
-                'Key the pose: captures translation, rotation, and scale of '
-                'every selected node at the playhead — and adds crystals at '
-                'the timeline\'s start and end where none exist, so every '
-                'playthrough begins and ends on a captured key. Existing '
-                'edge keys keep their pose.\n\n'
-                'How to use: select a node in the Outliner → drag the '
-                'playhead to a time → move/rotate/scale it with the viewport '
-                'gizmo → press Key. Move the playhead, pose again, press Key '
-                'again — the animation interpolates between keys.',
+            message: _controller.hasActiveComponent
+                ? 'Key the selected component property: records the node\'s '
+                      'authored ${_controller.activeComponentType}.'
+                      '${_controller.activeComponentProperty} value at the '
+                      'playhead.'
+                : 'Key the pose: captures translation, rotation, and scale of '
+                      'every selected node at the playhead — and adds crystals at '
+                      'the timeline\'s start and end where none exist, so every '
+                      'playthrough begins and ends on a captured key. Existing '
+                      'edge keys keep their pose.\n\n'
+                      'How to use: select a node in the Outliner → drag the '
+                      'playhead to a time → move/rotate/scale it with the viewport '
+                      'gizmo → press Key. Move the playhead, pose again, press Key '
+                      'again — the animation interpolates between keys.',
             child: SizedBox(
               height: 26,
               child: FilledButton.tonalIcon(
@@ -1074,6 +1166,36 @@ class _AnimationPanelState extends State<AnimationPanel> {
               ),
             ),
           ),
+          // A component property targeted in the outliner: show what Key will
+          // capture, so the redirect from the pose path is visible.
+          if (_controller.hasActiveComponent) ...[
+            const SizedBox(width: 8),
+            _PanelTip(
+              message:
+                  'Keying ${_controller.activeComponentType}.'
+                  '${_controller.activeComponentProperty} of '
+                  '${_controller.document.nodes[_controller.activeComponentNodeId]?.name ?? _controller.activeComponentNodeId?.toToken()}.',
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                decoration: BoxDecoration(
+                  color: scheme.primary.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.key, size: 12, color: scheme.primary),
+                    const SizedBox(width: 3),
+                    Text(
+                      'Key ${_controller.activeComponentType}.'
+                      '${_controller.activeComponentProperty}',
+                      style: TextStyle(fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
           const SizedBox(width: 8),
           if (_primaryKey != null) ...[
             Flexible(

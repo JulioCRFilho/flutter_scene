@@ -293,8 +293,49 @@ class EditorController extends ChangeNotifier
   static final Vector4 _highlightColor = Vector4(1.0, 0.55, 0.1, 1.0);
 
   void _onSelectionChanged() {
+    // A component-property authoring target stays live only while its node
+    // stays the primary selection; selecting any other node drops it.
+    if (_activeComponentNodeId != null &&
+        selection.primary != _activeComponentNodeId) {
+      _activeComponentNodeId = null;
+      _activeComponentType = null;
+      _activeComponentProperty = null;
+    }
     _syncHighlights();
     notifyListeners();
+  }
+
+  // --- component-property animation authoring -------------------------------
+
+  /// The outliner-selected component property the animation panel's Key
+  /// button targets: the owning node, the component type, and the property
+  /// (all null when none is selected). Transient view state like selection;
+  /// cleared when the selection moves off the owning node (see
+  /// [_onSelectionChanged]).
+  LocalId? _activeComponentNodeId;
+  String? _activeComponentType;
+  String? _activeComponentProperty;
+
+  /// The node carrying the outliner-selected component property, or null.
+  LocalId? get activeComponentNodeId => _activeComponentNodeId;
+
+  /// The component type of the outliner-selected component property, or null.
+  String? get activeComponentType => _activeComponentType;
+
+  /// The property name of the outliner-selected component property, or null.
+  String? get activeComponentProperty => _activeComponentProperty;
+
+  /// Whether a component property is currently targeted for authoring.
+  bool get hasActiveComponent => _activeComponentType != null;
+
+  /// Targets the animation panel's Key at node [nodeId]'s component property
+  /// `type.property` (the outliner's component rows call this). Reselects the
+  /// node, so the rest of the editor treats it as selected.
+  void selectComponentProperty(LocalId nodeId, String type, String property) {
+    _activeComponentNodeId = nodeId;
+    _activeComponentType = type;
+    _activeComponentProperty = property;
+    selection.selectOnly(nodeId);
   }
 
   // A hot-swapped `.fmat` shader repaints on its own (the shaders refreshed
@@ -471,6 +512,16 @@ class EditorController extends ChangeNotifier
   /// declares none, or is unknown).
   List<ComponentPropertyDef> componentSchema(String type) =>
       _componentRegistry.codecFor(type)?.propertySchema ?? const [];
+
+  /// The declared, float-encodable component properties of [type] — the
+  /// subset the animation panel can author as `componentProperty` channels
+  /// (one float row per keyframe). Structured kinds (distribution, curve,
+  /// gradient, object, union, string) stay out: their values serialize as
+  /// keyframe blobs, which the panel's float-value keying does not author.
+  List<ComponentPropertyDef> animatableComponentProperties(String type) => [
+    for (final def in componentSchema(type))
+      if (componentPropertyFloatStride(def.kind) != null) def,
+  ];
 
   /// The full portable schema of component [type], or null when unknown.
   ComponentSchema? componentSchemaFor(String type) =>

@@ -348,8 +348,11 @@ bool _payloadDiffers(PayloadSpec? payload, Uint8List bytes) {
     componentProperty: componentProperty,
     timeline: timelineId,
     keyframes: keyframesId,
-    // Rewriting a channel must never silently reset its interpolation.
+    // Rewriting a channel must never silently reset its interpolation or its
+    // blob payload id (the latter carries structured keyframe values for
+    // non-float-encodable component property kinds).
     interpolation: existing?.interpolation,
+    keyframesBlob: existing?.keyframesBlob,
   );
 
   // The rewritten channel keeps its current position in the channel list —

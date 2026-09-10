@@ -21,12 +21,16 @@ bool _gpuAvailable() {
 /// A document with one node plus a fresh animation, a selection on the node,
 /// and the full [AnimationPanel] pumped at 600×320.
 Future<(EditorController, LocalId, LocalId)> pumpEditablePanel(
-  WidgetTester tester,
-) async {
+  WidgetTester tester, {
+  List<ComponentSpec> components = const [],
+}) async {
   await Scene.initializeStaticResources();
   final document = SceneDocument();
   final nodeId = document.newId();
-  document.addNode(NodeSpec(id: nodeId, name: 'Bone'), root: true);
+  document.addNode(
+    NodeSpec(id: nodeId, name: 'Bone', components: components),
+    root: true,
+  );
   final session = EditorSession(document);
   final controller = await EditorController.open(session);
   addTearDown(controller.dispose);
@@ -106,6 +110,55 @@ void main() {
     }
     return null;
   }
+
+  testWidgets('Keying a selected component property keys its channel', (
+    tester,
+  ) async {
+    final (controller, animationId, nodeId) = await pumpEditablePanel(
+      tester,
+      components: [
+        ComponentSpec(
+          'directionalLight',
+          properties: {
+            // Non-default so the value is serialized in the document: component
+            // keying records authored document values (what the inspector
+            // writes into this bag), and defaults read as "no captured value".
+            'intensity': DoubleValue(5.0),
+          },
+        ),
+      ],
+    );
+    controller.selectPreviewAnimation(animationId);
+
+    // The outliner's property row calls this when selected; simulating it
+    // directly exercises the same controller surface the row uses.
+    controller.selectComponentProperty(nodeId, 'directionalLight', 'intensity');
+    await tester.pump();
+
+    // Default playhead at t=0, empty clip. Key records the authored value at
+    // the playhead and seeds a fresh channel's start/end crystals.
+    await tester.tap(find.text('Key'));
+    await tester.pumpAndSettle();
+
+    final spec = controller.document.animations[animationId]!;
+    final channel = spec.channels.singleWhere(
+      (ch) =>
+          ch.property == AnimationProperty.componentProperty &&
+          ch.componentType == 'directionalLight' &&
+          ch.componentProperty == 'intensity',
+    );
+    final times = channelTimes(controller.document, channel);
+    expect(times.map((t) => (t * 100).roundToDouble() / 100), [0.0, 1.0]);
+    final bytes = controller.document.payload(channel.keyframes)!.bytes!;
+    final values = bytes.buffer.asFloat32List(
+      bytes.offsetInBytes,
+      bytes.lengthInBytes ~/ 4,
+    );
+    // Every seeded key carries the authored value.
+    for (final value in values) {
+      expect(value, closeTo(5.0, 1e-4));
+    }
+  });
 
   testWidgets('a bone\'s lanes stay in translation → rotation → scale order', (
     tester,

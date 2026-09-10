@@ -35,6 +35,7 @@ const double _kInsertionExtent = 6;
 
 class _OutlinerPanelState extends State<OutlinerPanel> {
   final Set<LocalId> _collapsed = {};
+  final Set<String> _collapsedComponents = {};
   final ScrollController _scroll = ScrollController();
 
   EditorController get controller => widget.controller;
@@ -70,6 +71,7 @@ class _OutlinerPanelState extends State<OutlinerPanel> {
         controller,
         roots: controller.displayRoots(),
         collapsed: _collapsed,
+        collapsedComponents: _collapsedComponents,
       );
       var offset = 0.0;
       var found = false;
@@ -97,7 +99,10 @@ class _OutlinerPanelState extends State<OutlinerPanel> {
   @override
   void didUpdateWidget(OutlinerPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.controller != widget.controller) _collapsed.clear();
+    if (oldWidget.controller != widget.controller) {
+      _collapsed.clear();
+      _collapsedComponents.clear();
+    }
   }
 
   void _setExpanded(LocalId id, bool expanded) {
@@ -110,6 +115,18 @@ class _OutlinerPanelState extends State<OutlinerPanel> {
     });
   }
 
+  /// Expands or collapses the property rows of node [nodeId]'s component
+  /// [type], keyed by `nodeId/type` in [_collapsedComponents].
+  void _setComponentExpanded(LocalId nodeId, String type, bool expanded) {
+    setState(() {
+      if (expanded) {
+        _collapsedComponents.remove('${nodeId.toToken()}/$type');
+      } else {
+        _collapsedComponents.add('${nodeId.toToken()}/$type');
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -118,8 +135,12 @@ class _OutlinerPanelState extends State<OutlinerPanel> {
         final roots = controller.displayRoots();
         final entries = dev.Timeline.timeSync(
           'outliner.flatten',
-          () =>
-              _visibleEntries(controller, roots: roots, collapsed: _collapsed),
+          () => _visibleEntries(
+            controller,
+            roots: roots,
+            collapsed: _collapsed,
+            collapsedComponents: _collapsedComponents,
+          ),
         );
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -174,6 +195,43 @@ class _OutlinerPanelState extends State<OutlinerPanel> {
                               onExpandedChanged: (value) =>
                                   _setExpanded(node.id, value),
                             ),
+                          _VisibleComponent(
+                            :final nodeId,
+                            :final type,
+                            :final depth,
+                            :final expanded,
+                            :final hasProperties,
+                          ) =>
+                            _OutlinerComponent(
+                              key: ValueKey(
+                                'component:${nodeId.toToken()}/$type',
+                              ),
+                              nodeId: nodeId,
+                              type: type,
+                              controller: controller,
+                              depth: depth,
+                              expanded: expanded,
+                              hasProperties: hasProperties,
+                              onExpandedChanged: (value) =>
+                                  _setComponentExpanded(nodeId, type, value),
+                            ),
+                          _VisibleProperty(
+                            :final nodeId,
+                            :final type,
+                            :final property,
+                            :final depth,
+                          ) =>
+                            _OutlinerProperty(
+                              key: ValueKey(
+                                'property:${nodeId.toToken()}/$type/'
+                                '$property',
+                              ),
+                              nodeId: nodeId,
+                              type: type,
+                              property: property,
+                              controller: controller,
+                              depth: depth,
+                            ),
                         };
                       },
                     ),
@@ -215,10 +273,46 @@ class _VisibleInsertion extends _VisibleEntry {
   final int depth;
 }
 
+/// One component attached to a node (a `light`, `camera`, `emitter`, ...),
+/// rendered as a non-draggable grouping row beneath the node. Its authorable
+/// property rows follow when expanded.
+class _VisibleComponent extends _VisibleEntry {
+  const _VisibleComponent({
+    required this.nodeId,
+    required this.type,
+    required this.depth,
+    required this.expanded,
+    required this.hasProperties,
+  });
+
+  final LocalId nodeId;
+  final String type;
+  final int depth;
+  final bool expanded;
+  final bool hasProperties;
+}
+
+/// One authorable (float-encodable) property of a node's component. Selecting
+/// it targets the animation panel's Key at `type.property`.
+class _VisibleProperty extends _VisibleEntry {
+  const _VisibleProperty({
+    required this.nodeId,
+    required this.type,
+    required this.property,
+    required this.depth,
+  });
+
+  final LocalId nodeId;
+  final String type;
+  final String property;
+  final int depth;
+}
+
 List<_VisibleEntry> _visibleEntries(
   EditorController controller, {
   required List<LocalId> roots,
   required Set<LocalId> collapsed,
+  required Set<String> collapsedComponents,
 }) {
   final entries = <_VisibleEntry>[];
 
@@ -246,15 +340,50 @@ List<_VisibleEntry> _visibleEntries(
           expanded: expanded,
         ),
       );
-      if (expanded && children.isNotEmpty) {
-        final isMember = controller.isPrefabMember(id);
-        final isInstance = controller.document.nodes[id]?.instance != null;
-        addContainer(
-          id,
-          children,
-          depth + 1,
-          draggable && !isInstance && !isMember,
-        );
+      if (expanded) {
+        // A node's components render directly beneath it, above its children.
+        // A prefab member's components belong to the prefab source, not the
+        // host document, so they are not authorable here and stay hidden.
+        if (!controller.isPrefabMember(id)) {
+          for (final component in node.components) {
+            final type = component.type;
+            final componentExpanded = !collapsedComponents.contains(
+              '${id.toToken()}/$type',
+            );
+            final animatable = controller.animatableComponentProperties(type);
+            entries.add(
+              _VisibleComponent(
+                nodeId: id,
+                type: type,
+                depth: depth + 1,
+                expanded: componentExpanded,
+                hasProperties: animatable.isNotEmpty,
+              ),
+            );
+            if (componentExpanded) {
+              for (final def in animatable) {
+                entries.add(
+                  _VisibleProperty(
+                    nodeId: id,
+                    type: type,
+                    property: def.name,
+                    depth: depth + 2,
+                  ),
+                );
+              }
+            }
+          }
+        }
+        if (children.isNotEmpty) {
+          final isMember = controller.isPrefabMember(id);
+          final isInstance = controller.document.nodes[id]?.instance != null;
+          addContainer(
+            id,
+            children,
+            depth + 1,
+            draggable && !isInstance && !isMember,
+          );
+        }
       }
     }
     if (draggable) {
@@ -437,8 +566,13 @@ class _OutlinerNodeState extends State<_OutlinerNode> {
     final ctrl = widget.controller;
     final isSelected = ctrl.selection.contains(node.id);
     final childIds = ctrl.displayChildren(node.id);
-    final hasChildren = childIds.isNotEmpty;
     final isMember = ctrl.isPrefabMember(node.id);
+    // A node with attached components is expandable too: its component
+    // property rows render beneath it (the arrow toggles both). Prefab
+    // members' components are hidden (owned by the prefab source), so they
+    // only expand into real child nodes.
+    final hasChildren =
+        childIds.isNotEmpty || (node.components.isNotEmpty && !isMember);
     // The source document still carries the instance marker (the composed node
     // does not), so detect a prefab instance node there.
     final isInstance = ctrl.document.nodes[node.id]?.instance != null;
@@ -591,5 +725,138 @@ class _OutlinerNodeState extends State<_OutlinerNode> {
     );
 
     return row;
+  }
+}
+
+/// One component attached to a node, rendered as a non-draggable grouping row
+/// beneath the node. It expands to the component's authorable property rows;
+/// the component itself is not selectable (selection happens per property).
+class _OutlinerComponent extends StatelessWidget {
+  const _OutlinerComponent({
+    super.key,
+    required this.nodeId,
+    required this.type,
+    required this.controller,
+    required this.depth,
+    required this.expanded,
+    required this.hasProperties,
+    required this.onExpandedChanged,
+  });
+
+  final LocalId nodeId;
+  final String type;
+  final EditorController controller;
+  final int depth;
+  final bool expanded;
+  final bool hasProperties;
+  final ValueChanged<bool> onExpandedChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final active =
+        controller.hasActiveComponent &&
+        controller.activeComponentNodeId == nodeId &&
+        controller.activeComponentType == type;
+    final rowColor = active ? scheme.primary.withValues(alpha: 0.12) : null;
+    return Container(
+      height: _kRowExtent,
+      padding: EdgeInsets.only(left: 4.0 + depth * 16.0, right: 4),
+      color: rowColor,
+      child: Row(
+        children: [
+          SizedBox(
+            width: 16,
+            child: hasProperties
+                ? GestureDetector(
+                    onTap: () => onExpandedChanged(!expanded),
+                    child: Icon(
+                      expanded ? Icons.arrow_drop_down : Icons.arrow_right,
+                      size: 16,
+                    ),
+                  )
+                : null,
+          ),
+          const SizedBox(width: 2),
+          Icon(Icons.widgets_outlined, size: 12, color: scheme.primary),
+          const SizedBox(width: 4),
+          Expanded(
+            child: Text(
+              type,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                fontStyle: FontStyle.italic,
+                color: active ? scheme.primary : null,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One authorable component property of a node, rendered beneath its
+/// component. Selecting it targets the animation panel's Key at
+/// `type.property` ([EditorController.selectComponentProperty]); the row
+/// stays highlighted while it is the active authoring target.
+class _OutlinerProperty extends StatelessWidget {
+  const _OutlinerProperty({
+    super.key,
+    required this.nodeId,
+    required this.type,
+    required this.property,
+    required this.controller,
+    required this.depth,
+  });
+
+  final LocalId nodeId;
+  final String type;
+  final String property;
+  final EditorController controller;
+  final int depth;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final onSurface = scheme.onSurface;
+    final active =
+        controller.hasActiveComponent &&
+        controller.activeComponentNodeId == nodeId &&
+        controller.activeComponentType == type &&
+        controller.activeComponentProperty == property;
+    final rowColor = active ? scheme.primary.withValues(alpha: 0.12) : null;
+    return InkWell(
+      onTap: () => controller.selectComponentProperty(nodeId, type, property),
+      child: Container(
+        height: _kRowExtent,
+        padding: EdgeInsets.only(left: 4.0 + depth * 16.0, right: 4),
+        color: rowColor,
+        child: Row(
+          children: [
+            if (active)
+              Icon(Icons.key, size: 12, color: scheme.primary)
+            else
+              // The alignment slot keeps active/inactive rows from shifting.
+              SizedBox(width: 12),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Text(
+                '$type.$property',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: active ? FontWeight.w600 : FontWeight.normal,
+                  color: active ? scheme.primary : onSurface,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
