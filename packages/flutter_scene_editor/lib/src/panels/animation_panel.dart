@@ -1324,8 +1324,7 @@ class _AnimationPanelState extends State<AnimationPanel> {
                     Icon(Icons.key, size: 12, color: scheme.primary),
                     const SizedBox(width: 3),
                     Text(
-                      'Key ${_controller.activeComponentType}.'
-                      '${_controller.activeComponentProperty}',
+                      'Key ${_controller.activeComponentProperty}',
                       style: TextStyle(fontSize: 11),
                     ),
                   ],
@@ -1471,9 +1470,7 @@ class _AnimationPanelState extends State<AnimationPanel> {
 
   String _keyPropertyLabel(TimelineKey key) {
     if (key.property == AnimationProperty.componentProperty) {
-      final type = key.componentType ?? 'component';
-      final property = key.componentProperty ?? 'property';
-      return '$type.$property';
+      return key.componentProperty ?? 'property';
     }
     return key.property.name;
   }

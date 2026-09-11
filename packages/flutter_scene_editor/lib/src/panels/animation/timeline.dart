@@ -125,9 +125,7 @@ class _AnimationTimelineState extends State<AnimationTimeline> {
     if (channel.property != AnimationProperty.componentProperty) {
       return channel.property.name;
     }
-    final type = channel.componentType ?? 'component';
-    final property = channel.componentProperty ?? 'property';
-    return '$type.$property';
+    return channel.componentProperty ?? 'property';
   }
 
   EditorController get controller => widget.controller;
