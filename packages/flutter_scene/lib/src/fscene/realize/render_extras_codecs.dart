@@ -476,6 +476,73 @@ class SplatCodec extends ComponentCodec {
   }
 
   @override
+  bool isPropertyWritable(String propertyName) {
+    return propertyName != 'splats';
+  }
+
+  @override
+  bool writeLiveProperty(
+    Component component,
+    String name,
+    PropertyValue value,
+    RealizeContext context,
+  ) {
+    if (component is _DeferredSplatComponent) {
+      component.spec.properties[name] = value;
+      return true;
+    }
+    if (component is! SplatComponent) return false;
+    switch (name) {
+      case 'opacity':
+        if (value is DoubleValue) {
+          component.opacity = value.value;
+          return true;
+        }
+        if (value is IntValue) {
+          component.opacity = value.value.toDouble();
+          return true;
+        }
+      case 'splatScale':
+        if (value is DoubleValue) {
+          component.splatScale = value.value;
+          return true;
+        }
+        if (value is IntValue) {
+          component.splatScale = value.value.toDouble();
+          return true;
+        }
+      case 'tint':
+        if (value is Vec4Value) {
+          component.tint = value.value.clone();
+          return true;
+        }
+      case 'shDegree':
+        if (value is IntValue) {
+          component.shDegree = value.value;
+          return true;
+        }
+      case 'antialiased':
+        if (value is BoolValue) {
+          component.antialiased = value.value;
+          return true;
+        }
+      case 'crop':
+        if (value is MapValue) {
+          final mode = value.values['mode'];
+          final box = value.values['box'];
+          component.setCropBox(
+            box is Matrix4Value ? box.value.clone() : null,
+            mode: mode is StringValue
+                ? SplatCropMode.values.asNameMap()[mode.value] ?? SplatCropMode.none
+                : SplatCropMode.none,
+          );
+          return true;
+        }
+    }
+    return false;
+  }
+
+  @override
   ComponentSpec? serialize(Component component, SerializeContext context) {
     // Still loading; the retained spec is the lossless serialization.
     if (component is _DeferredSplatComponent) {

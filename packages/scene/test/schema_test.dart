@@ -90,6 +90,17 @@ void main() {
       expect((rereadTint.defaultValue! as ColorValue).g, 0.5);
     });
 
+    test('round-trips floatStride', () {
+      final colorDist = ComponentPropertyDef(
+        'startColor',
+        ComponentPropertyKind.distribution,
+        floatStride: 4,
+      );
+      final reread = ComponentPropertyDef.fromJson(colorDist.toJson());
+      expect(reread.floatStride, 4);
+      expect(reread.effectiveFloatStride, 4);
+    });
+
     test('round-trips nested list, object, and union structure', () {
       final def = ComponentPropertyDef(
         'shape',

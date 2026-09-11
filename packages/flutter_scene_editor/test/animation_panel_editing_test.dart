@@ -206,7 +206,7 @@ void main() {
     }
 
     // And the node's timeline lists the new lane under its title.
-    expect(painterRowTitles(tester), contains('directionalLight.intensity'));
+    expect(painterRowTitles(tester), contains('intensity'));
   });
 
   testWidgets('a bone\'s lanes stay in translation → rotation → scale order', (

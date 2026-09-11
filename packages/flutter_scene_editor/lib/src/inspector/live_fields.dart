@@ -584,7 +584,49 @@ class _ColorEditorState extends State<ColorEditor> {
           Padding(
             padding: const EdgeInsets.only(left: 8, bottom: 8),
             child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Wrap(
+                    spacing: 4,
+                    runSpacing: 4,
+                    children: [
+                      for (final (name, pr, pg, pb) in _palettePresets)
+                        Tooltip(
+                          message: name,
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(3),
+                            onTap: () {
+                              setState(() {
+                                _r = pr;
+                                _g = pg;
+                                _b = pb;
+                              });
+                              _preview();
+                              _commit();
+                            },
+                            child: Container(
+                              width: 18,
+                              height: 18,
+                              decoration: BoxDecoration(
+                                color: Color.fromARGB(
+                                  255,
+                                  (pr * 255).round(),
+                                  (pg * 255).round(),
+                                  (pb * 255).round(),
+                                ),
+                                border: Border.all(
+                                  color: Theme.of(context).dividerColor,
+                                ),
+                                borderRadius: BorderRadius.circular(3),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
                 _slider('R', _r, widget.channelMax, (v) => _r = v),
                 _slider('G', _g, widget.channelMax, (v) => _g = v),
                 _slider('B', _b, widget.channelMax, (v) => _b = v),
@@ -654,3 +696,17 @@ List<double> _hsvToRgb(double h, double s, double v) {
   }
   return [r + m, g + m, b + m];
 }
+
+const _palettePresets = [
+  ('White', 1.0, 1.0, 1.0),
+  ('Red', 1.0, 0.2, 0.2),
+  ('Orange', 1.0, 0.55, 0.0),
+  ('Yellow', 1.0, 0.9, 0.1),
+  ('Green', 0.2, 0.85, 0.3),
+  ('Cyan', 0.1, 0.85, 0.9),
+  ('Blue', 0.2, 0.5, 1.0),
+  ('Purple', 0.65, 0.2, 1.0),
+  ('Pink', 1.0, 0.4, 0.7),
+  ('Black', 0.0, 0.0, 0.0),
+];
+

@@ -11,6 +11,9 @@ import 'package:flutter_scene/src/particles/distribution.dart';
 import 'package:flutter/material.dart';
 import 'package:vector_math/vector_math.dart' show Vector4;
 
+import 'live_fields.dart';
+import 'property_editors.dart' show sliderColorChannel;
+
 const _labelWidth = 90.0;
 const _labelStyle = TextStyle(fontSize: 11);
 
@@ -177,6 +180,59 @@ class DistributionField extends StatelessWidget {
     };
   }
 }
+
+/// Edits a [ColorDistribution] property as a direct color picker.
+class ColorDistributionField extends StatelessWidget {
+  const ColorDistributionField({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.onChanged,
+    this.onPreview,
+    this.mixed = false,
+  });
+
+  final String label;
+  final PropertyValue? value;
+  final void Function(Object?) onChanged;
+  final void Function(PropertyValue)? onPreview;
+  final bool mixed;
+
+  @override
+  Widget build(BuildContext context) {
+    final dist = decodeColorDistribution(value);
+    final color = switch (dist) {
+      ConstantColor(:final color) => color,
+      UniformColor(:final a) => a,
+      GradientColor(:final gradient) =>
+        gradient.stops.isNotEmpty
+            ? gradient.stops.first.color
+            : Vector4(1, 1, 1, 1),
+    };
+
+    return ColorEditor(
+      label: label,
+      r: color.x,
+      g: color.y,
+      b: color.z,
+      a: color.w,
+      mixed: mixed,
+      channelBuilder: sliderColorChannel,
+      onPreview: (r, g, b, a) {
+        onPreview?.call(
+          encodeColorDistribution(ConstantColor(Vector4(r, g, b, a))),
+        );
+      },
+      onCommit: (r, g, b, a) {
+        onChanged({
+          'kind': 'constant',
+          'color': {'r': r, 'g': g, 'b': b, 'a': a},
+        });
+      },
+    );
+  }
+}
+
 
 // --- Curve ---
 

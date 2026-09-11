@@ -6,10 +6,12 @@ import 'package:flutter/services.dart';
 import 'package:flutter_scene_editor/src/assets/environment_thumbnail.dart';
 import 'package:flutter_scene_editor/src/inspector/live_fields.dart';
 import 'package:flutter_scene_editor/src/panels/inspector_panel.dart';
+import 'package:flutter_scene_editor/src/inspector/particle_value_editors.dart';
 import 'package:flutter_scene_editor/src/inspector/property_editors.dart';
 import 'package:flutter_scene_editor/src/shell/editor_theme.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
+import 'package:scene/scene.dart';
 
 void main() {
   Widget themed(Widget child) => FTheme(
@@ -431,6 +433,50 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('medium'), findsOneWidget);
   });
+
+  testWidgets(
+    'ColorDistributionField renders as color picker and commits constant color',
+    (tester) async {
+      Object? committed;
+      PropertyValue? previewed;
+
+      await tester.pumpWidget(
+        themed(
+          ColorDistributionField(
+            label: 'startColor',
+            value: null,
+            onPreview: (v) => previewed = v,
+            onChanged: (v) => committed = v,
+          ),
+        ),
+      );
+
+      expect(find.text('startColor'), findsOneWidget);
+      expect(find.byType(ColorEditor), findsOneWidget);
+
+      // Expand color editor
+      await tester.tap(find.text('startColor'));
+      await tester.pumpAndSettle();
+
+      // Red preset tooltip should be found
+      final redPreset = find.byTooltip('Red');
+      expect(redPreset, findsOneWidget);
+
+      await tester.tap(redPreset);
+      await tester.pump();
+
+      expect(committed, isA<Map<String, Object>>());
+      final map = committed as Map<String, Object>;
+      expect(map['kind'], 'constant');
+      final color = map['color'] as Map<String, Object>;
+      expect(color['r'], 1.0);
+      expect(color['g'], 0.2);
+      expect(color['b'], 0.2);
+      expect(color['a'], 1.0);
+
+      expect(previewed, isA<MapValue>());
+    },
+  );
 }
 
 class _AccordionRebuildHarness extends StatefulWidget {

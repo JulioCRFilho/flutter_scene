@@ -231,6 +231,7 @@ class ComponentPropertyDef {
         for (final constraint in constraints) constraint.toJson(),
       ],
     if (formerNames.isNotEmpty) 'formerNames': formerNames,
+    if (floatStride != null) 'floatStride': floatStride,
     if (transient) 'transient': true,
     if (itemDef != null) 'item': itemDef!.toJson(),
     if (objectFields != null)
@@ -294,6 +295,7 @@ class ComponentPropertyDef {
                 ],
             }
           : null,
+      floatStride: json['floatStride'] as int?,
     );
   }
 }

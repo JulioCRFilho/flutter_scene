@@ -128,7 +128,7 @@ void main() {
       await tester.pump();
 
       // Tap Key to key the active component.
-      final keyButton = find.widgetWithText(OutlinedButton, 'Key');
+      final keyButton = find.text('Key');
       expect(keyButton, findsOneWidget);
       await tester.tap(keyButton);
       await tester.pump();

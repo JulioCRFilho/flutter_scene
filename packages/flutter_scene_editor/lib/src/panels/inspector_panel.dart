@@ -1086,6 +1086,16 @@ class _SchemaPropertyRow extends StatelessWidget {
           onChanged: onChanged,
         );
       case ComponentPropertyKind.distribution:
+        if (def.effectiveFloatStride == 4 ||
+            def.name.toLowerCase().contains('color')) {
+          return ColorDistributionField(
+            label: label,
+            value: value,
+            mixed: mixed,
+            onPreview: (v) => onPreview?.call(v),
+            onChanged: onChanged,
+          );
+        }
         return DistributionField(
           label: label,
           value: value,

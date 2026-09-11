@@ -113,9 +113,9 @@ void main() {
       // Expanding it reveals the authorable property rows.
       await tester.tap(find.byIcon(Icons.arrow_right).first);
       await tester.pump();
-      expect(find.text('particleEmitter.emitRate'), findsOneWidget);
-      expect(find.text('particleEmitter.gravity'), findsOneWidget);
-      expect(find.text('particleEmitter.duration'), findsOneWidget);
+      expect(find.text('emitRate'), findsOneWidget);
+      expect(find.text('gravity'), findsOneWidget);
+      expect(find.text('duration'), findsOneWidget);
     },
   );
 
