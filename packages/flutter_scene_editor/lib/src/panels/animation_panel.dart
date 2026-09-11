@@ -226,7 +226,7 @@ class _AnimationPanelState extends State<AnimationPanel> {
     final keyTargets = <_KeyTarget>[];
     for (final nodeId in targets) {
       final origin = _controller.memberOrigin(nodeId);
-      if (origin == null) {
+      if (origin == null || !_controller.isPrefabMember(nodeId)) {
         // Plain nodes keep the current shape exactly; ids missing from the
         // document (a deleted node) are skipped as before.
         if (!_controller.document.nodes.containsKey(nodeId)) continue;
@@ -814,12 +814,32 @@ class _AnimationPanelState extends State<AnimationPanel> {
     final property = controller.activeComponentProperty;
     if (nodeId == null || type == null || property == null) return;
     final time = controller.previewTime;
+    final origin = controller.memberOrigin(nodeId);
+    final isMember = controller.isPrefabMember(nodeId);
+    final commandTarget =
+        isMember && origin != null ? origin.instanceId : nodeId;
+    final targetName = isMember ? controller.displayNode(nodeId)?.name : null;
+    if (isMember && (targetName == null || targetName.isEmpty)) {
+      _showError(
+        StateError(
+          'Cannot key component on ${nodeId.toToken()}: prefab members are '
+          'animated by name, and this member has no name. Rename it in the '
+          'Inspector first.',
+        ),
+      );
+      return;
+    }
     // The authored document value; a property still sitting at its schema
     // default has none serialized (delta persistence drops defaults), and
     // keying falls back to that default — the value the emitter actually
     // holds. The error below is left for types the registry does not know.
     final value =
-        _componentValueFor(nodeId, type, property) ??
+        _componentValueFor(
+          nodeId,
+          type,
+          property,
+          targetName: targetName,
+        ) ??
         _defaultSlotsFor(type, property);
     if (value == null) {
       _showError(
@@ -833,7 +853,8 @@ class _AnimationPanelState extends State<AnimationPanel> {
     }
     Map<String, Object?> keyParams(double at) => {
       'animationId': id.toToken(),
-      'nodeId': nodeId.toToken(),
+      'nodeId': commandTarget.toToken(),
+      if (targetName != null) 'targetName': targetName,
       'property': AnimationProperty.componentProperty.name,
       'componentType': type,
       'componentProperty': property,
@@ -843,7 +864,13 @@ class _AnimationPanelState extends State<AnimationPanel> {
     final commands = <(String, Map<String, Object?>)>[
       ('setAnimationKeyframe', keyParams(time)),
     ];
-    if (!_componentChannelExists(id, nodeId, type, property)) {
+    if (!_componentChannelExists(
+      id,
+      commandTarget,
+      type,
+      property,
+      targetName: targetName,
+    )) {
       var end = controller.previewDuration(id);
       if (end <= 1e-4) end = 1.0;
       for (final edge in {0.0, end}) {
@@ -858,20 +885,22 @@ class _AnimationPanelState extends State<AnimationPanel> {
     }
   }
 
-  /// Whether [nodeId]'s `type.property` component channel already exists on
+  /// Whether [target]'s `type.property` component channel already exists on
   /// animation [id].
   bool _componentChannelExists(
     LocalId id,
-    LocalId nodeId,
+    LocalId target,
     String type,
-    String property,
-  ) {
+    String property, {
+    String? targetName,
+  }) {
     final spec = _controller.document.animations[id];
     if (spec == null) return false;
     return spec.channels.any(
       (c) =>
           c.property == AnimationProperty.componentProperty &&
-          c.target == nodeId &&
+          c.target == target &&
+          (c.targetName ?? '') == (targetName ?? '') &&
           c.componentType == type &&
           c.componentProperty == property,
     );

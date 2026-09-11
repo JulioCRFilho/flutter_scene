@@ -925,10 +925,11 @@ class EditorController extends ChangeNotifier
   /// playback and scrubbing keep working.
   void restoreOriginalPose() {
     _stopTicker();
-    for (final entry in document.nodes.entries) {
-      final live = _liveById[entry.key];
-      if (live == null) continue;
-      applyTransformSpec(live, entry.value.transform);
+    for (final id in displayDocument.nodes.keys) {
+      final live = _liveById[id];
+      final node = displayNode(id);
+      if (live == null || node == null) continue;
+      applyTransformSpec(live, node.transform);
     }
     // Prefab members (bones inside imported instances) have no document node
     // to look up; restore them from their captured live transforms.
@@ -1013,7 +1014,9 @@ class EditorController extends ChangeNotifier
       // stale or last-animated pose.
       applyTransformSpec(
         live,
-        document.nodes[entry.key]?.transform ?? entry.value,
+        displayNode(entry.key)?.transform ??
+            document.nodes[entry.key]?.transform ??
+            entry.value,
       );
     }
     // Prefab members (bones inside imported instances) are restored from
@@ -1057,7 +1060,8 @@ class EditorController extends ChangeNotifier
 
   void _captureIfNeeded(LocalId nodeId) {
     if (_prePreviewTransforms.containsKey(nodeId)) return;
-    final spec = document.nodes[nodeId]?.transform;
+    final spec =
+        displayNode(nodeId)?.transform ?? document.nodes[nodeId]?.transform;
     if (spec != null) _prePreviewTransforms[nodeId] = spec;
   }
 
@@ -1073,7 +1077,9 @@ class EditorController extends ChangeNotifier
       if (live == null || channel.property == AnimationProperty.weights) {
         continue;
       }
-      _captureIfNeeded(channel.target);
+      if (channel.property != AnimationProperty.componentProperty) {
+        _captureIfNeeded(channel.target);
+      }
       // Name-targeted channels drive a node inside the channel's target
       // subtree (see [resolveChannelTarget], which mirrors the runtime bind
       // resolver AnimationClip._bindToTarget). Being null means the target
@@ -1084,7 +1090,8 @@ class EditorController extends ChangeNotifier
         if (member == null) continue;
         // Descendant members have no document node of their own to restore
         // from; the self case was already captured above, keyed by node id.
-        if (!identical(member, live)) {
+        if (!identical(member, live) &&
+            channel.property != AnimationProperty.componentProperty) {
           _prePreviewMemberTransforms.putIfAbsent(
             member,
             () => TrsTransform(
@@ -1619,8 +1626,11 @@ class EditorController extends ChangeNotifier
     Object value,
   ) {
     if (!isEditableNode(id)) return Future.value();
+    final docNode = document.nodes[id];
+    final isHostComponent =
+        docNode?.components.any((c) => c.type == type) ?? false;
     final origin = memberOrigin(id);
-    if (origin != null) {
+    if (!isHostComponent && origin != null) {
       return _override(origin, 'components.$type.$key', value);
     }
     return run('setComponentProperties', {
@@ -1678,7 +1688,10 @@ class EditorController extends ChangeNotifier
       final id = entry.key;
       final raw = entry.value;
       if (!isEditableNode(id)) continue;
-      if (memberOrigin(id) != null) {
+      final docNode = document.nodes[id];
+      final isHostComponent =
+          docNode?.components.any((c) => c.type == type) ?? false;
+      if (!isHostComponent && memberOrigin(id) != null) {
         for (final property in raw.entries) {
           await setComponentPropertyRouted(
             id,
@@ -2274,7 +2287,10 @@ class EditorController extends ChangeNotifier
     }
     if (_reflectReparentedNodes(transaction)) return;
     final cheap = transaction.records.every(
-      (r) => _cheapSlots.contains(r.slot),
+      (r) =>
+          _cheapSlots.contains(r.slot) &&
+          (r.slot != ChangeSlot.transform ||
+              document.node(r.targetId)?.instance == null),
     );
     if (cheap) {
       _reflectCheap(transaction);
@@ -3026,6 +3042,7 @@ class EditorController extends ChangeNotifier
       final composedNode = _composed?.nodes[record.targetId];
       switch (record.slot) {
         case ChangeSlot.transform:
+          if (docNode.instance != null) break;
           live?.localTransform = docNode.transform.toMatrix4();
           composedNode?.transform = docNode.transform;
         case ChangeSlot.visible:
