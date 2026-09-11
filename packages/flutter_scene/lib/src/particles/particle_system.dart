@@ -117,15 +117,20 @@ class ParticleSystem {
   /// system).
   double duration;
 
-  /// The fixed simulation timestep in seconds.
-  final double fixedStep;
+  /// The fixed simulation timestep in seconds. Mutable so an animated
+  /// `fixedStep` keyframe can retune the integrator in place (guarded to
+  /// stay positive by the codec's live write).
+  double fixedStep;
 
   /// The largest frame delta honored by [step]; longer frames are clamped so a
-  /// hitch cannot spiral the accumulator.
-  final double maxFrameTime;
+  /// hitch cannot spiral the accumulator. Mutable so an animated
+  /// `maxFrameTime` keyframe can retune it in place (the codec's live write
+  /// keeps it at or above [fixedStep]).
+  double maxFrameTime;
 
-  /// The seed for all spawn randomness.
-  final int seed;
+  /// The seed for all spawn randomness. Mutable so an animated `seed`
+  /// keyframe can re-roll the spawn stream (applied on the next [reset]).
+  int seed;
 
   math.Random _random;
   double _accumulator = 0.0;

@@ -221,8 +221,13 @@ AnimationSpec _copyAnimation(AnimationSpec a, _Remap remap) => AnimationSpec(
         target: remap(c.target),
         targetName: c.targetName,
         property: c.property,
+        componentType: c.componentType,
+        componentProperty: c.componentProperty,
         timeline: remap(c.timeline),
         keyframes: remap(c.keyframes),
+        keyframesBlob:
+            c.keyframesBlob == null ? null : remap(c.keyframesBlob!),
+        interpolation: c.interpolation,
       ),
   ],
 );

@@ -876,6 +876,13 @@ Map<String, dynamic> _encodeAnimation(
         'target': idKey(ch.target),
         if (ch.targetName != null) 'targetName': ch.targetName,
         'property': ch.property.name,
+        if (ch.property == AnimationProperty.componentProperty) ...{
+          if (ch.componentType != null) 'componentType': ch.componentType,
+          if (ch.componentProperty != null)
+            'componentProperty': ch.componentProperty,
+          if (ch.keyframesBlob != null)
+            'keyframesBlob': idKey(ch.keyframesBlob!),
+        },
         'timeline': idKey(ch.timeline),
         'keyframes': idKey(ch.keyframes),
         // Omitted for the default so pre-interpolation documents encode
@@ -1495,8 +1502,13 @@ AnimationChannelSpec _decodeChannel(Map<String, dynamic> json) =>
       target: LocalId.parse(json['target'] as String),
       targetName: json['targetName'] as String?,
       property: AnimationProperty.values.byName(json['property'] as String),
+      componentType: json['componentType'] as String?,
+      componentProperty: json['componentProperty'] as String?,
       timeline: LocalId.parse(json['timeline'] as String),
       keyframes: LocalId.parse(json['keyframes'] as String),
+      keyframesBlob: json['keyframesBlob'] != null
+          ? LocalId.parse(json['keyframesBlob'] as String)
+          : null,
       interpolation: json['interpolation'] == null
           ? null
           : AnimationInterpolation.values.byName(json['interpolation'] as String),

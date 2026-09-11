@@ -1,13 +1,20 @@
 import 'dart:typed_data';
 
 import 'package:scene/scene.dart';
+import 'package:scene/schema.dart';
 import 'package:flutter_scene_editor_core/flutter_scene_editor_core.dart';
 import 'package:test/test.dart';
 import 'package:vector_math/vector_math.dart';
 
 /// A document plus a history and a registry wired to it, for command tests.
-({SceneDocument doc, EditHistory history, CommandRegistry registry})
-_harness() {
+typedef _Harness = ({
+  SceneDocument doc,
+  EditHistory history,
+  CommandRegistry registry,
+  ComponentSchema? Function(String type)? schemaLookup,
+});
+
+_Harness _harness({ComponentSchema? Function(String type)? componentSchema}) {
   final doc = SceneDocument(allocator: IdAllocator(session: 1));
   final registry = CommandRegistry();
   registerBuiltinCommands(registry);
@@ -15,21 +22,27 @@ _harness() {
     doc: doc,
     history: EditHistory(DocumentMutator(doc)),
     registry: registry,
+    schemaLookup: componentSchema,
   );
 }
 
 /// Runs a command by name and commits its transaction.
 void _run(
-  ({SceneDocument doc, EditHistory history, CommandRegistry registry}) h,
+  _Harness h,
   String command,
   Map<String, Object?> params,
 ) {
   final entry = h.registry.lookup(command)!;
-  h.history.commit(entry.execute(CommandContext(h.doc), params));
+  h.history.commit(
+    entry.execute(
+      CommandContext(h.doc, componentSchema: h.schemaLookup),
+      params,
+    ),
+  );
 }
 
 LocalId _addCube(
-  ({SceneDocument doc, EditHistory history, CommandRegistry registry}) h,
+  _Harness h,
   String name,
 ) {
   _run(h, 'createNode', {'name': name});
@@ -389,6 +402,41 @@ void main() {
         );
         expect(times, [0.0, 1.0]);
         expect(values[1][1], 3.0);
+      });
+
+      test('component property channels round trip through .fscene text and .fsceneb', () {
+        final source = _harness();
+        _run(source, 'createAnimation', {'name': 'LightPulse'});
+        final animationId = source.doc.animations.keys.single;
+        final node = _addCube(source, 'Light');
+        for (final entry in {0.0: 1.0, 1.0: 5.0}.entries) {
+          _run(source, 'setAnimationKeyframe', {
+            'animationId': animationId.toToken(),
+            'nodeId': node.toToken(),
+            'property': 'componentProperty',
+            'componentType': 'pointLight',
+            'componentProperty': 'intensity',
+            'time': entry.key,
+            'value': [entry.value],
+          });
+        }
+
+        final text = writeFscene(source.doc);
+        final restored = readFscene(text);
+        final anim = restored.animations[animationId]!;
+        expect(anim.channels, hasLength(1));
+        final ch = anim.channels.single;
+        expect(ch.property, AnimationProperty.componentProperty);
+        expect(ch.componentType, 'pointLight');
+        expect(ch.componentProperty, 'intensity');
+
+        final container = Uint8List.fromList(writeFsceneb(source.doc));
+        final withBytes = readFsceneb(container);
+        final restoredCh = withBytes.animations[animationId]!.channels.single;
+        final times = withBytes.payload(restoredCh.timeline)!.bytes!.buffer.asFloat32List();
+        final values = withBytes.payload(restoredCh.keyframes)!.bytes!.buffer.asFloat32List();
+        expect(times.toList(), [0.0, 1.0]);
+        expect(values.toList(), [1.0, 5.0]);
       });
     });
   });
@@ -1042,6 +1090,253 @@ void main() {
       // And the instance was never mis-authored either.
       expect(h.doc.animations[animationId]!.channels, isEmpty);
       expect(h.doc.node(instance), isNotNull);
+    });
+
+    group('component property channels', () {
+      final testSchema = ComponentSchema(
+        'pointLight',
+        properties: [
+          ComponentPropertyDef(
+            'intensity',
+            ComponentPropertyKind.number,
+            defaultValue: DoubleValue(1.0),
+          ),
+          ComponentPropertyDef(
+            'color',
+            ComponentPropertyKind.color,
+            defaultValue: ColorValue(1, 1, 1, 1),
+          ),
+          ComponentPropertyDef(
+            'falloffCurve',
+            ComponentPropertyKind.curve,
+          ),
+        ],
+      );
+
+      test('validates value stride against component schema', () {
+        final h = _harness(
+          componentSchema: (t) => t == 'pointLight' ? testSchema : null,
+        );
+        final lightNode = _addCube(h, 'Light');
+        _run(h, 'createAnimation', {'name': 'Pulse'});
+        final animId = h.doc.animations.keys.last;
+
+        // Valid stride for number (1 float)
+        _run(h, 'setAnimationKeyframe', {
+          'animationId': animId.toToken(),
+          'nodeId': lightNode.toToken(),
+          'property': 'componentProperty',
+          'componentType': 'pointLight',
+          'componentProperty': 'intensity',
+          'time': 0.0,
+          'value': [5.0],
+        });
+        expect(h.doc.animations[animId]!.channels, hasLength(1));
+
+        // Mismatched stride for color (expects 4 floats, provided 3)
+        expect(
+          () => _run(h, 'setAnimationKeyframe', {
+            'animationId': animId.toToken(),
+            'nodeId': lightNode.toToken(),
+            'property': 'componentProperty',
+            'componentType': 'pointLight',
+            'componentProperty': 'color',
+            'time': 0.0,
+            'value': [1.0, 0.0, 0.0],
+          }),
+          throwsA(
+            isA<CommandException>().having(
+              (e) => '$e',
+              'message',
+              contains('expects 4 float(s)'),
+            ),
+          ),
+        );
+
+        // Structured kind (curve) cannot be keyed as float row
+        expect(
+          () => _run(h, 'setAnimationKeyframe', {
+            'animationId': animId.toToken(),
+            'nodeId': lightNode.toToken(),
+            'property': 'componentProperty',
+            'componentType': 'pointLight',
+            'componentProperty': 'falloffCurve',
+            'time': 0.0,
+            'value': [1.0, 2.0],
+          }),
+          throwsA(
+            isA<CommandException>().having(
+              (e) => '$e',
+              'message',
+              contains('structured kind'),
+            ),
+          ),
+        );
+
+        // Unknown type/property falls back to schemaless behavior
+        _run(h, 'setAnimationKeyframe', {
+          'animationId': animId.toToken(),
+          'nodeId': lightNode.toToken(),
+          'property': 'componentProperty',
+          'componentType': 'customType',
+          'componentProperty': 'customProp',
+          'time': 0.0,
+          'value': [1.0, 2.0, 3.0],
+        });
+        expect(h.doc.animations[animId]!.channels, hasLength(2));
+      });
+
+      test('move and remove component keyframes with componentType and componentProperty', () {
+        final h = _harness();
+        final node = _addCube(h, 'Light');
+        _run(h, 'createAnimation', {'name': 'Pulse'});
+        final animId = h.doc.animations.keys.last;
+
+        _run(h, 'setAnimationKeyframe', {
+          'animationId': animId.toToken(),
+          'nodeId': node.toToken(),
+          'property': 'componentProperty',
+          'componentType': 'pointLight',
+          'componentProperty': 'intensity',
+          'time': 0.0,
+          'value': [1.0],
+        });
+        _run(h, 'setAnimationKeyframe', {
+          'animationId': animId.toToken(),
+          'nodeId': node.toToken(),
+          'property': 'componentProperty',
+          'componentType': 'pointLight',
+          'componentProperty': 'intensity',
+          'time': 1.0,
+          'value': [5.0],
+        });
+
+        // Move keyframe from 1.0 to 2.0
+        _run(h, 'moveAnimationKeyframe', {
+          'animationId': animId.toToken(),
+          'nodeId': node.toToken(),
+          'property': 'componentProperty',
+          'componentType': 'pointLight',
+          'componentProperty': 'intensity',
+          'fromTime': 1.0,
+          'toTime': 2.0,
+        });
+
+        // Remove keyframe at 0.0
+        _run(h, 'removeAnimationKeyframe', {
+          'animationId': animId.toToken(),
+          'nodeId': node.toToken(),
+          'property': 'componentProperty',
+          'componentType': 'pointLight',
+          'componentProperty': 'intensity',
+          'time': 0.0,
+        });
+
+        final channel = h.doc.animations[animId]!.channels.single;
+        final times = h.doc.payload(channel.timeline)!.bytes!.buffer.asFloat32List();
+        expect(times.toList(), [2.0]);
+      });
+
+      test('re-keying a cubic component channel keeps its logical row width verbatim', () {
+        final h = _harness();
+        final node = _addCube(h, 'Node');
+        _run(h, 'createAnimation', {'name': 'Clip'});
+        final animId = h.doc.animations.keys.last;
+
+        _run(h, 'setAnimationKeyframe', {
+          'animationId': animId.toToken(),
+          'nodeId': node.toToken(),
+          'property': 'componentProperty',
+          'componentType': 'pointLight',
+          'componentProperty': 'intensity',
+          'time': 0.0,
+          'value': [2.5],
+        });
+
+        // Set channel interpolation to cubic directly on spec
+        final ch = h.doc.animations[animId]!.channels.single;
+        h.doc.animations[animId]!.channels[0] = AnimationChannelSpec(
+          target: ch.target,
+          targetName: ch.targetName,
+          property: ch.property,
+          componentType: ch.componentType,
+          componentProperty: ch.componentProperty,
+          timeline: ch.timeline,
+          keyframes: ch.keyframes,
+          keyframesBlob: ch.keyframesBlob,
+          interpolation: AnimationInterpolation.cubic,
+        );
+
+        // Re-key at 1.0
+        _run(h, 'setAnimationKeyframe', {
+          'animationId': animId.toToken(),
+          'nodeId': node.toToken(),
+          'property': 'componentProperty',
+          'componentType': 'pointLight',
+          'componentProperty': 'intensity',
+          'time': 1.0,
+          'value': [4.0],
+        });
+
+        final values = h.doc.payload(ch.keyframes)!.bytes!.buffer.asFloat32List();
+        // Stride must remain 1 float per keyframe, NOT 3 floats
+        expect(values.length, 2);
+        expect(values[0], 2.5);
+        expect(values[1], 4.0);
+      });
+
+      test('cleanAnimationChannels retains structured keyframesBlob channels', () {
+        final h = _harness();
+        final node = _addCube(h, 'Emitter');
+        _run(h, 'createAnimation', {'name': 'Clip'});
+        final animId = h.doc.animations.keys.last;
+
+        final timesPayload = h.doc.newId();
+        h.doc.addPayload(PayloadSpec(
+          timesPayload,
+          encoding: PayloadEncoding.floats,
+          length: 4,
+          bytes: Float32List.fromList([0.0]).buffer.asUint8List(),
+        ));
+        final blobPayload = h.doc.newId();
+        h.doc.addPayload(PayloadSpec(
+          blobPayload,
+          encoding: PayloadEncoding.bytes,
+          length: 10,
+          bytes: Uint8List.fromList([1, 2, 3, 4, 5]),
+        ));
+
+        h.doc.animations[animId]!.channels.add(
+          AnimationChannelSpec(
+            target: node,
+            property: AnimationProperty.componentProperty,
+            componentType: 'particleEmitter',
+            componentProperty: 'lifetime',
+            timeline: timesPayload,
+            keyframes: timesPayload, // dummy
+            keyframesBlob: blobPayload,
+          ),
+        );
+
+        // Add a constant transform channel that is genuinely unused
+        final still = _addCube(h, 'Still');
+        for (final time in const [0.0, 1.0]) {
+          _run(h, 'setAnimationKeyframe', {
+            'animationId': animId.toToken(),
+            'nodeId': still.toToken(),
+            'property': 'scale',
+            'time': time,
+          });
+        }
+
+        expect(h.doc.animations[animId]!.channels, hasLength(2));
+        _run(h, 'cleanAnimationChannels', {
+          'animationId': animId.toToken(),
+        });
+        // Constant scale dropped, but keyframesBlob channel must NOT be removed
+        expect(h.doc.animations[animId]!.channels, hasLength(1));
+        expect(h.doc.animations[animId]!.channels.single.property, AnimationProperty.componentProperty);
+      });
     });
   });
 }

@@ -12,6 +12,7 @@ library;
 import 'dart:typed_data';
 
 import 'package:scene/scene.dart';
+import 'package:scene/schema.dart';
 import 'package:vector_math/vector_math.dart';
 
 import 'change.dart';
@@ -672,6 +673,9 @@ final setAnimationKeyframe = CommandEntry(
       _currentTrs(node),
       interpolation: channel?.interpolation,
       previousRow: previousRow,
+      ctx: ctx,
+      componentType: componentType,
+      componentProperty: componentProperty,
     );
     _upsert(data, time, value);
     final (records, _) = _writeChannel(
@@ -698,6 +702,9 @@ List<double> _keyValue(
   TrsTransform trs, {
   AnimationInterpolation? interpolation,
   List<double>? previousRow,
+  CommandContext? ctx,
+  String? componentType,
+  String? componentProperty,
 }) {
   if (property == AnimationProperty.weights) {
     throw CommandException('Morph-weight keyframes are not authorable here');
@@ -718,7 +725,37 @@ List<double> _keyValue(
         throw const CommandException('Every entry of "value" must be a number');
       }
     }
-    return [for (final entry in raw) (entry as num).toDouble()];
+    final value = [for (final entry in raw) (entry as num).toDouble()];
+    if (ctx != null && componentType != null && componentProperty != null) {
+      final schema = ctx.componentSchema?.call(componentType);
+      if (schema != null) {
+        ComponentPropertyDef? def;
+        for (final prop in schema.properties) {
+          if (prop.name == componentProperty) {
+            def = prop;
+            break;
+          }
+        }
+        if (def != null) {
+          final stride = componentPropertyFloatStride(def.kind);
+          if (stride == null) {
+            throw CommandException(
+              'Component property "$componentType.$componentProperty" of kind '
+              '"${def.kind.name}" is a structured kind whose keyframe values are '
+              'carried in keyframesBlob payloads; it cannot be keyed as a float row',
+            );
+          }
+          if (value.length != stride) {
+            throw CommandException(
+              'Component property "$componentType.$componentProperty" of kind '
+              '"${def.kind.name}" expects $stride float(s) per keyframe, '
+              'got ${value.length}',
+            );
+          }
+        }
+      }
+    }
+    return value;
   }
   final quaternion = optionalQuaternion(key, 'rotation');
   final euler = optionalEuler(key, 'rotationEuler');
@@ -800,6 +837,9 @@ List<double> _layoutRow(
   List<double>? inTangent,
   List<double>? outTangent,
 }) {
+  if (property == AnimationProperty.componentProperty) {
+    return logical;
+  }
   final stride = _strideOf(property);
   final cubic = interpolation == AnimationInterpolation.cubic;
   if (!cubic) {
@@ -926,7 +966,14 @@ final setAnimationKeyframes = CommandEntry(
         _layoutRow(
           channel?.interpolation,
           property,
-          _keyValue(key, property, trs),
+          _keyValue(
+            key,
+            property,
+            trs,
+            ctx: ctx,
+            componentType: componentType,
+            componentProperty: componentProperty,
+          ),
           previousRow: previousRow,
         ),
       );
@@ -1591,6 +1638,13 @@ final List<CommandEntry> animationCommands = [
 /// keyframe holds the same value (constant through the whole clip).
 bool _isUnusedChannel(SceneDocument document, AnimationChannelSpec channel) {
   if (document.node(channel.target) == null) return true;
+  if (channel.keyframesBlob != null) {
+    final blob = document.payload(channel.keyframesBlob!);
+    if (blob == null || blob.length == 0) return true;
+    final times = document.payload(channel.timeline);
+    if (times == null || times.length == 0) return true;
+    return false;
+  }
   final data = _readKeyframes(document, channel);
   if (data.times.isEmpty) return true;
   const epsilon = 1e-6;

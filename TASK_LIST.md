@@ -103,71 +103,42 @@ Found while reviewing the shipped feature. Each is independently shippable.
 `packages/flutter_scene/lib/src/animation/property_resolver.dart`,
 `packages/flutter_scene_editor_core/lib/src/animation_commands.dart`,
 `packages/flutter_scene_editor_core/test/animation_command_test.dart`
-**Status**: ⏳ Pending
+**Status**: ✅ Complete
 **Context**: The keyframe commands accept any non-empty numeric `value`
 list because document-level commands carry no component schema knowledge.
 The host *does* provide one (`CommandContext.componentSchema`), but only
-the component commands use it. Consequences for an agent keying a
-component property blindly:
-- A **structured kind** (distribution, curve, gradient, object, union,
-  string — anything outside `componentPropertyFloatStride`) has its values
-  carried in the channel's `keyframesBlob` payload, not the float payload.
-  The command silently writes floats that playback ignores, and the stale
-  blob wins — a no-op key that looks like it worked.
-- A **wrongly-sized float row** (say 3 floats for a color) mis-frames the
-  payload: `_layoutStrideOf` derives the stride from the payload, so one
-  bad key reframes every other keyframe of the channel.
-**Plan**:
-- Move `componentPropertyFloatStride` into `scene` (next to
-  `ComponentPropertyKind`, whose doc comment already calls it "the
-  serialization contract shared by the scene serializer, the editor
-  keyframe commands, and the animation resolvers") so editor_core — which
-  depends on `scene` only — uses the one true copy.
-- In `setAnimationKeyframe`/`setAnimationKeyframes`, when
-  `ctx.componentSchema` resolves the kind: float-encodable kinds require
-  `value.length == stride`; structured kinds are rejected with an error
-  that names the limitation.
-- No schema lookup / unknown type / unknown property keeps the current
-  shape-guessing fallback (the host decides what is registered).
-**Acceptance**: command tests with a schema-backed harness (stride
-mismatch + structured kind + schemaless fallback).
+the component commands use it.
+**Resolution**:
+- `componentPropertyFloatStride` centralized in `packages/scene/lib/src/schema/component_schema.dart`.
+- `setAnimationKeyframe`/`setAnimationKeyframes` validates `value.length == stride` against schema definitions when schema is present.
+- Structured property kinds (distribution, curve, gradient, object, union, string) rejected with descriptive error.
+- Verified with unit tests covering schema validation, stride mismatch, and fallback.
 
 ---
 
 ### R2. Guard legacy cubic component channels in `_layoutRow`
 **Files**: `packages/flutter_scene_editor_core/lib/src/animation_commands.dart`
-**Status**: ⏳ Pending
+**Status**: ✅ Complete
 **Context**: Component channels are never authored cubic (tangent rows
 are not laid out for them; `setChannelInterpolation` rejects it and the
 runtime resolver treats a cubic component channel as linear). But a
-hand-crafted or legacy document can carry one, and `_layoutRow` builds
+hand-crafted or legacy document can carry one, and `_layoutRow` built
 `stride 3 × 3` rows for non-rotation cubic channels — corrupting the
 component channel's payload layout on re-key.
-**Plan**: `_layoutRow` returns the logical row verbatim for
-`componentProperty` (the linear layout is the one playback reads).
-**Acceptance**: a command test re-keying a cubic component channel keeps
-the payload row width the value's own.
-
----
-
-### 8. Wire keyframe commands for component properties
-**Files**: `packages/flutter_scene_editor_core/lib/src/animation_commands.dart`
-**Status**: ⏳ Pending
-**Changes needed**:
-- Add `setComponentAnimationKeyframes` command
-- Add `addComponentAnimationChannel` command
-- Commands mirror existing TRS keyframe commands but target component properties
-- Undo/redo support through existing command infrastructure
+**Resolution**:
+- `_layoutRow` returns logical row verbatim for `componentProperty` channels.
+- Verified with unit test re-keying a cubic component channel without inflating row stride.
 
 ---
 
 ## Implementation Order
-1. ✅ Task 1 (spec extension - done)
-2. Task 2 (enum extension) - foundation for everything else
-3. Task 3 (serialization) - enables save/load of component animations
-4. Task 4 (resolvers) - enables runtime evaluation
-5. Task 5+6 (clip/player) - enables borrow/restore lifecycle
-6. Task 7+8 (UI/commands) - enables editor authoring
+1. ✅ Task 1 (spec extension)
+2. ✅ Task 2 (enum extension)
+3. ✅ Task 3 (serialization)
+4. ✅ Task 4 (resolvers)
+5. ✅ Task 5+6 (clip/player borrow/restore lifecycle)
+6. ✅ Task 7+8 (UI/commands editor authoring)
+7. ✅ R1+R2 (schema validation & cubic protection follow-ups)
 
 ## Testing Strategy
 - Unit tests for serialization round-trip (spec → encode → decode → spec)

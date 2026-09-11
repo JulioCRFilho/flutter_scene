@@ -389,6 +389,8 @@ class _AnimationTimelineState extends State<AnimationTimeline> {
               target: channel.target,
               targetName: channel.targetName,
               property: channel.property,
+              componentType: channel.componentType,
+              componentProperty: channel.componentProperty,
               time: time,
             );
           }
@@ -527,6 +529,9 @@ class _AnimationTimelineState extends State<AnimationTimeline> {
                                           target: key.target,
                                           targetName: key.targetName,
                                           property: key.property,
+                                          componentType: key.componentType,
+                                          componentProperty:
+                                              key.componentProperty,
                                           time: key.time + _dragOffset,
                                         ),
                                     },
@@ -638,16 +643,24 @@ class _AnimationTimelineState extends State<AnimationTimeline> {
       if (!mixed && mode == common) return;
       final commands = <(String, Map<String, Object?>)>[
         for (final channel in channels)
-          (
-            'setChannelInterpolation',
-            {
-              'animationId': animation.id.toToken(),
-              'nodeId': channel.target.toToken(),
-              'property': channel.property.name,
-              if (channel.targetName != null) 'targetName': channel.targetName,
-              'interpolation': mode,
-            },
-          ),
+          if (mode != 'cubic' ||
+              channel.property != AnimationProperty.componentProperty)
+            (
+              'setChannelInterpolation',
+              {
+                'animationId': animation.id.toToken(),
+                'nodeId': channel.target.toToken(),
+                'property': channel.property.name,
+                if (channel.targetName != null)
+                  'targetName': channel.targetName,
+                if (channel.property ==
+                    AnimationProperty.componentProperty) ...{
+                  'componentType': channel.componentType,
+                  'componentProperty': channel.componentProperty,
+                },
+                'interpolation': mode,
+              },
+            ),
       ];
       try {
         await controller.runAll(commands);

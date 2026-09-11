@@ -185,6 +185,17 @@ class _TimelinePainter extends CustomPainter {
     );
     canvas.save();
     canvas.clipRect(laneClip);
+    bool keyMatchesChannel(TimelineKey k, AnimationChannelSpec channel) {
+      if (k.target != channel.target || k.property != channel.property) {
+        return false;
+      }
+      if (channel.property == AnimationProperty.componentProperty) {
+        return k.componentType == channel.componentType &&
+            k.componentProperty == channel.componentProperty;
+      }
+      return true;
+    }
+
     for (var row = 0; row < rows.length; row++) {
       final entry = rows[row];
       if (entry.isHeader) continue;
@@ -213,8 +224,7 @@ class _TimelinePainter extends CustomPainter {
         final draggingFrom =
             dragFromKeys?.any(
               (k) =>
-                  k.target == channel.target &&
-                  k.property == channel.property &&
+                  keyMatchesChannel(k, channel) &&
                   (k.time - time).abs() <= 1e-3,
             ) ??
             false;
@@ -227,8 +237,7 @@ class _TimelinePainter extends CustomPainter {
           top + _rowHeight / 2,
           selectedKeys.any(
             (k) =>
-                k.target == channel.target &&
-                k.property == channel.property &&
+                keyMatchesChannel(k, channel) &&
                 (k.time - time).abs() <= 1e-3,
           ),
         );
@@ -238,8 +247,7 @@ class _TimelinePainter extends CustomPainter {
       // diamonds follow the cursor until the moves are committed on release.
       if (dragFromKeys != null) {
         for (final key in dragFromKeys!) {
-          if (key.target != channel.target ||
-              key.property != channel.property) {
+          if (!keyMatchesChannel(key, channel)) {
             continue;
           }
           final x = labelWidth + key.time * pxPerSecond - scrollPx;

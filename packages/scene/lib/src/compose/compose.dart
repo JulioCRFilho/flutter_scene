@@ -710,8 +710,12 @@ AnimationSpec _remapAnimation(
         target: remap(ch.target),
         targetName: ch.targetName,
         property: ch.property,
+        componentType: ch.componentType,
+        componentProperty: ch.componentProperty,
         timeline: remap(ch.timeline),
         keyframes: remap(ch.keyframes),
+        keyframesBlob:
+            ch.keyframesBlob == null ? null : remap(ch.keyframesBlob!),
         interpolation: ch.interpolation,
       ),
   ],

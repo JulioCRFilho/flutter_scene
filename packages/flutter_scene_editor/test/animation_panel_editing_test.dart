@@ -706,4 +706,201 @@ void main() {
       );
     },
   );
+
+  testWidgets('deleting a component keyframe via the delete button', (
+    tester,
+  ) async {
+    final (controller, animationId, nodeId) = await pumpEditablePanel(
+      tester,
+      components: [ComponentSpec('directionalLight')],
+    );
+    controller.selectPreviewAnimation(animationId);
+    controller.selectComponentProperty(nodeId, 'directionalLight', 'intensity');
+    await tester.pump();
+    await tester.tap(find.text('Key'));
+    await tester.pumpAndSettle();
+
+    final spec = controller.document.animations[animationId]!;
+    final channel = spec.channels.singleWhere(
+      (c) =>
+          c.property == AnimationProperty.componentProperty &&
+          c.componentProperty == 'intensity',
+    );
+    expect(channelTimes(controller.document, channel), [0.0, 1.0]);
+
+    // Tap the diamond at t=0.0 on row 1 (y=51.0, x=120.0).
+    final timeline = find.byType(AnimationTimeline);
+    final topLeft = tester.getTopLeft(timeline);
+    await tester.tapAt(topLeft + const Offset(120.0, 51.0));
+    await tester.pumpAndSettle();
+
+    // Verify delete button is present and click it.
+    expect(find.byIcon(Icons.delete_outline), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.delete_outline));
+    await tester.pumpAndSettle();
+
+    // The key at 0.0 is removed, only 1.0 remains.
+    final updatedTimes = channelTimes(controller.document, channel);
+    expect(updatedTimes.map((t) => (t * 100).roundToDouble() / 100), [1.0]);
+  });
+
+  testWidgets('the lane ✕ removes a component channel from the timeline', (
+    tester,
+  ) async {
+    final (controller, animationId, nodeId) = await pumpEditablePanel(
+      tester,
+      components: [ComponentSpec('directionalLight')],
+    );
+    controller.selectPreviewAnimation(animationId);
+    controller.selectComponentProperty(nodeId, 'directionalLight', 'intensity');
+    await tester.pump();
+    await tester.tap(find.text('Key'));
+    await tester.pumpAndSettle();
+
+    expect(
+      controller.document.animations[animationId]!.channels.any(
+        (c) =>
+            c.property == AnimationProperty.componentProperty &&
+            c.componentProperty == 'intensity',
+      ),
+      isTrue,
+    );
+
+    // Tap the ✕ button on the lane.
+    await tester.tap(find.byIcon(Icons.close).first);
+    await tester.pumpAndSettle();
+
+    expect(
+      controller.document.animations[animationId]!.channels.any(
+        (c) =>
+            c.property == AnimationProperty.componentProperty &&
+            c.componentProperty == 'intensity',
+      ),
+      isFalse,
+    );
+  });
+
+  testWidgets(
+    'multiple component channels on the same node do not collide in selection',
+    (tester) async {
+      final (controller, animationId, nodeId) = await pumpEditablePanel(
+        tester,
+        components: [
+          ComponentSpec(
+            'directionalLight',
+            properties: {
+              'intensity': DoubleValue(5.0),
+              'color': Vec3Value(Vector3(1.0, 0.5, 0.2)),
+            },
+          ),
+        ],
+      );
+      controller.selectPreviewAnimation(animationId);
+
+      // Key intensity
+      controller.selectComponentProperty(
+        nodeId,
+        'directionalLight',
+        'intensity',
+      );
+      await tester.pump();
+      await tester.tap(find.text('Key'));
+      await tester.pumpAndSettle();
+
+      // Key color
+      controller.selectComponentProperty(nodeId, 'directionalLight', 'color');
+      await tester.pump();
+      await tester.tap(find.text('Key'));
+      await tester.pumpAndSettle();
+
+      final spec = controller.document.animations[animationId]!;
+      final intensityChannel = spec.channels.singleWhere(
+        (c) =>
+            c.property == AnimationProperty.componentProperty &&
+            c.componentProperty == 'intensity',
+      );
+      final colorChannel = spec.channels.singleWhere(
+        (c) =>
+            c.property == AnimationProperty.componentProperty &&
+            c.componentProperty == 'color',
+      );
+      expect(channelTimes(controller.document, intensityChannel), [0.0, 1.0]);
+      expect(channelTimes(controller.document, colorChannel), [0.0, 1.0]);
+
+      // Row 0: Bone header.
+      // Row 1: intensity lane (y=51.0).
+      // Row 2: color lane (y=73.0).
+      final timeline = find.byType(AnimationTimeline);
+      final topLeft = tester.getTopLeft(timeline);
+
+      // Tap the intensity key at t=0.0.
+      await tester.tapAt(topLeft + const Offset(120.0, 51.0));
+      await tester.pumpAndSettle();
+
+      // Delete only the selected key.
+      await tester.tap(find.byIcon(Icons.delete_outline));
+      await tester.pumpAndSettle();
+
+      // Intensity key at t=0.0 is deleted; color key at t=0.0 remains untouched.
+      expect(
+        channelTimes(controller.document, intensityChannel).map((t) => (t * 100).roundToDouble() / 100),
+        [1.0],
+      );
+      expect(
+        channelTimes(controller.document, colorChannel).map((t) => (t * 100).roundToDouble() / 100),
+        [0.0, 1.0],
+      );
+    },
+  );
+
+  testWidgets(
+    'group interpolation control skips cubic on component channels',
+    (tester) async {
+      final (controller, animationId, nodeId) = await pumpEditablePanel(
+        tester,
+        components: [ComponentSpec('directionalLight')],
+      );
+      controller.selectPreviewAnimation(animationId);
+
+      // Add a transform key and a component key
+      await controller.run('setAnimationKeyframe', {
+        'animationId': animationId.toToken(),
+        'nodeId': nodeId.toToken(),
+        'property': 'translation',
+        'time': 0.0,
+        'translation': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+      });
+      await controller.run('setAnimationKeyframe', {
+        'animationId': animationId.toToken(),
+        'nodeId': nodeId.toToken(),
+        'property': 'translation',
+        'time': 1.0,
+        'translation': {'x': 1.0, 'y': 0.0, 'z': 0.0},
+      });
+      controller.selectComponentProperty(
+        nodeId,
+        'directionalLight',
+        'intensity',
+      );
+      await tester.pump();
+      await tester.tap(find.text('Key'));
+      await tester.pumpAndSettle();
+
+      // Click 'Cubic' in the header group interpolation pill
+      await tester.tap(find.text('Cubic'));
+      await tester.pumpAndSettle();
+
+      final spec = controller.document.animations[animationId]!;
+      final translation = spec.channels.singleWhere(
+        (c) => c.property == AnimationProperty.translation,
+      );
+      final intensity = spec.channels.singleWhere(
+        (c) => c.property == AnimationProperty.componentProperty,
+      );
+
+      // Translation became cubic; intensity remained linear without crashing.
+      expect(translation.interpolation, AnimationInterpolation.cubic);
+      expect(intensity.interpolation, AnimationInterpolation.linear);
+    },
+  );
 }

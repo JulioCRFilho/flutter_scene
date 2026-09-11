@@ -100,15 +100,7 @@ class _AnimationPanelState extends State<AnimationPanel> {
     setState(() {});
   }
 
-  bool _keyExists(
-    ({
-      LocalId target,
-      String? targetName,
-      AnimationProperty property,
-      double time,
-    })
-    key,
-  ) {
+  bool _keyExists(TimelineKey key) {
     final id = _controller.previewAnimationId;
     if (id == null) return false;
     final spec = _controller.document.animations[id];
@@ -117,6 +109,11 @@ class _AnimationPanelState extends State<AnimationPanel> {
       if (channel.target != key.target ||
           channel.targetName != key.targetName ||
           channel.property != key.property) {
+        continue;
+      }
+      if (channel.property == AnimationProperty.componentProperty &&
+          (channel.componentType != key.componentType ||
+              channel.componentProperty != key.componentProperty)) {
         continue;
       }
       for (final time in channelTimes(_controller.document, channel)) {
@@ -265,7 +262,7 @@ class _AnimationPanelState extends State<AnimationPanel> {
     };
 
     final commands = <(String, Map<String, Object?>)>[
-      for (final target in keyTargets)
+      for (final target in keyTargets) ...[
         for (final p
             in property == null
                 ? const [
@@ -293,6 +290,43 @@ class _AnimationPanelState extends State<AnimationPanel> {
               ...?_livePoseFor(target.node, p, targetName: target.targetName),
             },
           ),
+        if (property == null && _animation != null)
+          for (final channel in _animation!.channels)
+            if (channel.property == AnimationProperty.componentProperty &&
+                channel.componentType != null &&
+                channel.componentProperty != null) ...[
+              if (target.targetName == null
+                  ? channel.target == target.node
+                  : channel.target == target.commandTarget &&
+                      channel.targetName == target.targetName) ...[
+                if (_componentValueFor(
+                      target.node,
+                      channel.componentType,
+                      channel.componentProperty,
+                      targetName: target.targetName,
+                    ) ??
+                    _defaultSlotsFor(
+                      channel.componentType,
+                      channel.componentProperty,
+                    )
+                    case final val?)
+                  (
+                    'setAnimationKeyframe',
+                    {
+                      'animationId': id.toToken(),
+                      'nodeId': target.commandTarget.toToken(),
+                      if (target.targetName != null)
+                        'targetName': target.targetName,
+                      'property': AnimationProperty.componentProperty.name,
+                      'componentType': channel.componentType,
+                      'componentProperty': channel.componentProperty,
+                      'time': time,
+                      'value': val,
+                    },
+                  ),
+              ],
+            ],
+      ],
     ];
     try {
       await _controller.runAll(commands);
@@ -419,6 +453,10 @@ class _AnimationPanelState extends State<AnimationPanel> {
         'nodeId': channel.target.toToken(),
         'property': channel.property.name,
         if (channel.targetName != null) 'targetName': channel.targetName,
+        if (channel.property == AnimationProperty.componentProperty) ...{
+          'componentType': channel.componentType,
+          'componentProperty': channel.componentProperty,
+        },
       });
     } on Exception catch (error) {
       _showError(error);
@@ -468,6 +506,10 @@ class _AnimationPanelState extends State<AnimationPanel> {
           'nodeId': key.target.toToken(),
           if (key.targetName != null) 'targetName': key.targetName,
           'property': key.property.name,
+          if (key.property == AnimationProperty.componentProperty) ...{
+            'componentType': key.componentType,
+            'componentProperty': key.componentProperty,
+          },
           'time': key.time,
         });
       }
@@ -493,6 +535,10 @@ class _AnimationPanelState extends State<AnimationPanel> {
           'nodeId': key.target.toToken(),
           if (key.targetName != null) 'targetName': key.targetName,
           'property': key.property.name,
+          if (key.property == AnimationProperty.componentProperty) ...{
+            'componentType': key.componentType,
+            'componentProperty': key.componentProperty,
+          },
           'fromTime': key.time,
           'toTime': clamped,
         });
@@ -721,6 +767,7 @@ class _AnimationPanelState extends State<AnimationPanel> {
               channel.target,
               channel.componentType,
               channel.componentProperty,
+              targetName: channel.targetName,
             ) ??
             _defaultSlotsFor(channel.componentType, channel.componentProperty);
         if (value == null) {
@@ -830,21 +877,42 @@ class _AnimationPanelState extends State<AnimationPanel> {
     );
   }
 
-  /// The float-encoded authored value of [nodeId]'s `componentType.
-  /// componentProperty`, read from the document (the value the inspector
-  /// shows), or null when the node, component, or property has no serialized
-  /// value yet. The document serializes only values that differ from the
-  /// component's default, so a property sitting at its default reads null —
-  /// callers fall back to [_defaultSlotsFor] before surfacing an error.
+  /// The float-encoded authored or live value of [nodeId]'s `componentType.
+  /// componentProperty`. Inspects the live component first so live or
+  /// inspector tweaks are captured directly, then falls back to `displayNode`
+  /// (which resolves prefab members) and the document node. Callers fall
+  /// back to [_defaultSlotsFor] before surfacing an error.
   List<double>? _componentValueFor(
     LocalId nodeId,
     String? componentType,
-    String? componentProperty,
-  ) {
-    final node = _controller.document.node(nodeId);
-    if (node == null || componentType == null || componentProperty == null) {
+    String? componentProperty, {
+    String? targetName,
+  }) {
+    if (componentType == null || componentProperty == null) {
       return null;
     }
+    // 1. Try reading from the live node's component if present.
+    final liveTarget = _controller.liveNode(nodeId);
+    if (liveTarget != null) {
+      final target = targetName == null
+          ? liveTarget
+          : resolveChannelTarget(liveTarget, targetName);
+      if (target != null) {
+        final val = _controller.readLiveComponentProperty(
+          target,
+          componentType,
+          componentProperty,
+        );
+        if (val != null) {
+          final slots = _floatSlots(val);
+          if (slots.isNotEmpty) return slots;
+        }
+      }
+    }
+    // 2. Fall back to displayNode (resolves prefab members) or document node.
+    final node =
+        _controller.displayNode(nodeId) ?? _controller.document.node(nodeId);
+    if (node == null) return null;
     for (final component in node.components) {
       if (component.type != componentType) continue;
       final value = component.properties[componentProperty];
@@ -1231,7 +1299,7 @@ class _AnimationPanelState extends State<AnimationPanel> {
                 _selectedKeys.length > 1
                     ? '${_selectedKeys.length} keys selected'
                     : '${_keyLabel(_primaryKey!)} · '
-                          '${_primaryKey!.property.name} @ '
+                          '${_keyPropertyLabel(_primaryKey!)} @ '
                           '${_primaryKey!.time.toStringAsFixed(2)}s',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -1312,6 +1380,11 @@ class _AnimationPanelState extends State<AnimationPanel> {
       if (channel.target == key.target &&
           channel.targetName == key.targetName &&
           channel.property == key.property) {
+        if (channel.property == AnimationProperty.componentProperty &&
+            (channel.componentType != key.componentType ||
+                channel.componentProperty != key.componentProperty)) {
+          continue;
+        }
         return channel;
       }
     }
@@ -1321,6 +1394,13 @@ class _AnimationPanelState extends State<AnimationPanel> {
   Future<void> _setChannelInterpolation(String mode) async {
     final key = _primaryKey;
     if (key == null) return;
+    if (key.property == AnimationProperty.componentProperty &&
+        mode == 'cubic') {
+      _showError(
+        'Component property channels only interpolate linearly or step-wise.',
+      );
+      return;
+    }
     // The selected key's channel carries the binding fallback; passing it
     // keeps a member channel (stored under the instance id with a targetName)
     // from matching the instance's own channel instead.
@@ -1330,6 +1410,10 @@ class _AnimationPanelState extends State<AnimationPanel> {
       'nodeId': key.target.toToken(),
       if (channel?.targetName != null) 'targetName': channel!.targetName,
       'property': key.property.name,
+      if (key.property == AnimationProperty.componentProperty) ...{
+        'componentType': key.componentType,
+        'componentProperty': key.componentProperty,
+      },
       'interpolation': mode,
     });
   }
@@ -1342,6 +1426,15 @@ class _AnimationPanelState extends State<AnimationPanel> {
   String _keyLabel(TimelineKey key) {
     if (key.targetName != null) return key.targetName!;
     return _nodeName(key.target);
+  }
+
+  String _keyPropertyLabel(TimelineKey key) {
+    if (key.property == AnimationProperty.componentProperty) {
+      final type = key.componentType ?? 'component';
+      final property = key.componentProperty ?? 'property';
+      return '$type.$property';
+    }
+    return key.property.name;
   }
 }
 

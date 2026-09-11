@@ -505,6 +505,24 @@ class EditorController extends ChangeNotifier
   // realize in the viewport.
   final FsceneComponentRegistry _componentRegistry;
 
+  /// The component registry used to realize and serialize components.
+  FsceneComponentRegistry get componentRegistry => _componentRegistry;
+
+  /// Reads the current value of [propertyName] from [liveNode]'s [componentType]
+  /// component via its codec, or null if unresolvable.
+  PropertyValue? readLiveComponentProperty(
+    Node liveNode,
+    String componentType,
+    String propertyName,
+  ) {
+    final codec = _componentRegistry.codecFor(componentType);
+    if (codec == null) return null;
+    final comp = componentOwnedBy(liveNode, codec);
+    if (comp == null) return null;
+    final spec = codec.serialize(comp, SerializeContext(SceneDocument()));
+    return spec?.properties[propertyName] ?? codec.defaultOf(propertyName);
+  }
+
   /// The component type names that can be added to a node.
   List<String> componentTypes() => _componentRegistry.types.toList();
 
@@ -999,18 +1017,25 @@ class EditorController extends ChangeNotifier
       applyTransformSpec(entry.key, entry.value);
     }
     // Component properties an animation preview touched go back to their
-    // captured live values; there is no document-driven restore for these
-    // (prefab members have no document spec to read from either).
+    // authored document values (if present on the document node), falling back
+    // to their captured live values (for prefab members or properties sitting at default).
     for (final entry in _prePreviewComponentProperties.entries) {
       final live = _liveById[entry.key];
       if (live == null) continue;
+      final docNode = document.nodes[entry.key];
       for (final property in entry.value.entries) {
         final dot = property.key.indexOf('.');
+        final compType = property.key.substring(0, dot);
+        final propName = property.key.substring(dot + 1);
+        final docComp = docNode?.components
+            .where((c) => c.type == compType)
+            .firstOrNull;
+        final docValue = docComp?.properties[propName];
         _writeComponentProperty(
           live,
-          property.key.substring(0, dot),
-          property.key.substring(dot + 1),
-          property.value,
+          compType,
+          propName,
+          docValue ?? property.value,
         );
       }
     }
@@ -1176,7 +1201,7 @@ class EditorController extends ChangeNotifier
     final key = '$componentType.$propertyName';
     final captured = _prePreviewComponentProperties[nodeId];
     if (captured != null && captured.containsKey(key)) return;
-    final component = _componentOwnedBy(liveNode, codec);
+    final component = componentOwnedBy(liveNode, codec);
     if (component == null) return;
     // Serialize into a scratch document: a codec's serialize may mint ids or
     // add payloads (mesh geometry does), which must never land in the real
@@ -1194,7 +1219,7 @@ class EditorController extends ChangeNotifier
   }
 
   /// The component on [node] that [codec] owns, or null when none matches.
-  Component? _componentOwnedBy(Node node, ComponentCodec codec) {
+  Component? componentOwnedBy(Node node, ComponentCodec codec) {
     for (final component in node.getComponents<Component>()) {
       if (codec.claims(component)) return component;
       if (codec.componentType != Component &&
@@ -2676,6 +2701,22 @@ class EditorController extends ChangeNotifier
       }
     }
     context.runAfterRealize();
+    if (_previewAnimation != null) {
+      for (final id in ids) {
+        final docNode = document.nodes[id];
+        if (docNode != null) {
+          for (final comp in docNode.components) {
+            for (final entry in comp.properties.entries) {
+              final key = '${comp.type}.${entry.key}';
+              if (_prePreviewComponentProperties.containsKey(id) &&
+                  _prePreviewComponentProperties[id]!.containsKey(key)) {
+                _prePreviewComponentProperties[id]![key] = entry.value;
+              }
+            }
+          }
+        }
+      }
+    }
     return true;
   }
 

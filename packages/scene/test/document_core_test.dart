@@ -52,4 +52,67 @@ void main() {
     expect(reread.editor, isNull);
     expect(writeFscene(reread), writeFscene(document));
   });
+
+  test('animations with component property channels round-trip through .fscene text', () {
+    final doc = SceneDocument();
+    final node = doc.newId();
+    doc.addNode(NodeSpec(id: node, name: 'Light'), root: true);
+
+    final timePayload = doc.newId();
+    final keyPayload = doc.newId();
+    final blobPayload = doc.newId();
+    doc.addPayload(PayloadSpec(timePayload, encoding: PayloadEncoding.floats));
+    doc.addPayload(PayloadSpec(keyPayload, encoding: PayloadEncoding.floats));
+    doc.addPayload(PayloadSpec(blobPayload, encoding: PayloadEncoding.bytes));
+
+    final animId = doc.newId();
+    doc.addAnimation(
+      AnimationSpec(
+        animId,
+        name: 'Clip',
+        channels: [
+          AnimationChannelSpec(
+            target: node,
+            targetName: 'Light',
+            property: AnimationProperty.componentProperty,
+            componentType: 'pointLight',
+            componentProperty: 'intensity',
+            timeline: timePayload,
+            keyframes: keyPayload,
+            interpolation: AnimationInterpolation.step,
+          ),
+          AnimationChannelSpec(
+            target: node,
+            property: AnimationProperty.componentProperty,
+            componentType: 'particleEmitter',
+            componentProperty: 'colorGradient',
+            timeline: timePayload,
+            keyframes: keyPayload,
+            keyframesBlob: blobPayload,
+          ),
+        ],
+      ),
+    );
+
+    final text = writeFscene(doc);
+    final reread = readFscene(text);
+    final rereadAnim = reread.animations[animId]!;
+    expect(rereadAnim.channels, hasLength(2));
+
+    final ch1 = rereadAnim.channels[0];
+    expect(ch1.property, AnimationProperty.componentProperty);
+    expect(ch1.componentType, 'pointLight');
+    expect(ch1.componentProperty, 'intensity');
+    expect(ch1.targetName, 'Light');
+    expect(ch1.interpolation, AnimationInterpolation.step);
+    expect(ch1.keyframesBlob, isNull);
+
+    final ch2 = rereadAnim.channels[1];
+    expect(ch2.property, AnimationProperty.componentProperty);
+    expect(ch2.componentType, 'particleEmitter');
+    expect(ch2.componentProperty, 'colorGradient');
+    expect(ch2.keyframesBlob, blobPayload);
+
+    expect(writeFscene(reread), text);
+  });
 }

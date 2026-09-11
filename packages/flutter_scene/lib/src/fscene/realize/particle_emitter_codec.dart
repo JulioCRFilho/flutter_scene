@@ -619,9 +619,16 @@ ComponentField<C> _distributionField<C extends Component>(
 );
 
 /// The [ParticleSystem] configuration fields shared by the sprite and mesh
-/// particle emitter codecs. All are constructor-only: they read from the live
-/// system (via [systemOf]) for serialization, and realize flows them through
-/// [particleSystemFromProperties] in the codec's `create`.
+/// particle emitter codecs. Reads flow from the live system (via [systemOf])
+/// for serialization, realize flows them through
+/// [particleSystemFromProperties] in the codec's `create`, and the animated
+/// knobs carry live writes so an animation (editor preview or runtime clip)
+/// retunes the running system in place. Structural and constructor-baked
+/// fields stay write-free: [maxParticles] sizes the storage allocated at
+/// realize (animating it would reallocate mid-play), [prewarm] is a
+/// construction-time bake, the burst list/shape/module stack serialize as
+/// blobs, and the distributions are structured kinds the float channels
+/// never carry.
 List<ComponentField<C>> particleSystemFields<C extends Component>(
   ParticleSystem Function(C component) systemOf,
 ) => [
@@ -638,6 +645,7 @@ List<ComponentField<C>> particleSystemFields<C extends Component>(
     doc: 'Steady emission rate in particles per second.',
     constraints: const [Range.nonNegative()],
     get: (c) => systemOf(c).spawner.rate,
+    set: (c, v) => systemOf(c).spawner.rate = v,
   ),
   ComponentField(
     _burstsDef,
@@ -698,12 +706,14 @@ List<ComponentField<C>> particleSystemFields<C extends Component>(
     defaultValue: Vector3.zero,
     doc: 'Constant acceleration applied each step.',
     get: (c) => systemOf(c).gravity,
+    set: (c, v) => systemOf(c).gravity.setFrom(v),
   ),
   ComponentField.boolean(
     'looping',
     defaultValue: true,
     doc: 'Whether the emitter emits forever.',
     get: (c) => systemOf(c).looping,
+    set: (c, v) => systemOf(c).looping = v,
   ),
   ComponentField.number(
     'duration',
@@ -711,6 +721,11 @@ List<ComponentField<C>> particleSystemFields<C extends Component>(
     doc: 'Run length in seconds (emit cutoff when not looping).',
     constraints: const [Range.nonNegative()],
     get: (c) => systemOf(c).duration,
+    set: (c, v) {
+      // The constructor asserts a positive run length; keep a keyed zero
+      // from tripping it mid-play (the value holds until a valid one lands).
+      if (v > 0) systemOf(c).duration = v;
+    },
   ),
   ComponentField.number(
     'fixedStep',
@@ -718,6 +733,15 @@ List<ComponentField<C>> particleSystemFields<C extends Component>(
     doc: 'Fixed simulation timestep in seconds.',
     constraints: const [Range.nonNegative()],
     get: (c) => systemOf(c).fixedStep,
+    set: (c, v) {
+      // Same positive-timestep invariant the constructor asserts; keep
+      // maxFrameTime >= fixedStep as well.
+      if (v > 0) {
+        final system = systemOf(c);
+        system.fixedStep = v;
+        if (system.maxFrameTime < v) system.maxFrameTime = v;
+      }
+    },
   ),
   ComponentField.number(
     'maxFrameTime',
@@ -725,12 +749,18 @@ List<ComponentField<C>> particleSystemFields<C extends Component>(
     doc: 'Largest frame delta honored per step.',
     constraints: const [Range.nonNegative()],
     get: (c) => systemOf(c).maxFrameTime,
+    set: (c, v) {
+      // Keep the maxFrameTime >= fixedStep invariant the constructor asserts.
+      final system = systemOf(c);
+      if (v >= system.fixedStep) system.maxFrameTime = v;
+    },
   ),
   ComponentField.integer(
     'seed',
     defaultValue: 0,
     doc: 'Seed for all spawn randomness.',
     get: (c) => systemOf(c).seed,
+    set: (c, v) => systemOf(c).seed = v,
   ),
   ComponentField.number(
     'prewarm',
