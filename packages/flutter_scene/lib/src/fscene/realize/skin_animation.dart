@@ -14,7 +14,7 @@ import 'package:vector_math/vector_math.dart';
 import 'package:flutter_scene/src/animation.dart' as engine;
 import 'package:flutter_scene/src/fscene/realize/realize.dart'
     show defaultComponentRegistry;
-import 'package:scene/schema.dart' show ComponentPropertyKind;
+import 'package:scene/schema.dart' show ComponentPropertyDef;
 import 'package:scene/scene.dart';
 import 'package:flutter_scene/src/node.dart';
 import 'package:flutter_scene/src/skin.dart';
@@ -152,8 +152,8 @@ engine.Animation? buildAnimation(
           // unreachable for well-formed documents); skip.
           continue;
         }
-        final kind = _componentPropertyKind(componentType, propertyName);
-        if (kind == null) {
+        final def = _componentPropertyDef(componentType, propertyName);
+        if (def == null) {
           sceneLog(
             'fscene: animation "${spec.name}" channel targets unknown '
             'component property "$componentType.$propertyName"; skipped',
@@ -164,10 +164,11 @@ engine.Animation? buildAnimation(
         resolver = engine.PropertyResolver.makeComponentPropertyTimeline(
           times,
           values,
-          kind: kind,
+          kind: def.kind,
           componentType: componentType,
           propertyName: propertyName,
           interpolation: interpolation,
+          floatStride: def.effectiveFloatStride,
           keyframesBlobPayload: channel.keyframesBlob == null
               ? null
               : document.payload(channel.keyframesBlob!)?.bytes,
@@ -205,17 +206,17 @@ List<Matrix4> _matrices(PayloadSpec? payload) {
   ];
 }
 
-/// The [ComponentPropertyKind] of component property
+/// The [ComponentPropertyDef] of component property
 /// `componentType.propertyName` per the default component registry's
 /// schemas, or null when the component type or property is unknown.
-ComponentPropertyKind? _componentPropertyKind(
+ComponentPropertyDef? _componentPropertyDef(
   String componentType,
   String propertyName,
 ) {
   final codec = defaultComponentRegistry().codecFor(componentType);
   if (codec == null) return null;
   for (final def in codec.propertySchema) {
-    if (def.name == propertyName) return def.kind;
+    if (def.name == propertyName) return def;
   }
   return null;
 }

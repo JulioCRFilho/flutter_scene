@@ -737,7 +737,7 @@ List<double> _keyValue(
           }
         }
         if (def != null) {
-          final stride = componentPropertyFloatStride(def.kind);
+          final stride = def.effectiveFloatStride;
           if (stride == null) {
             throw CommandException(
               'Component property "$componentType.$componentProperty" of kind '

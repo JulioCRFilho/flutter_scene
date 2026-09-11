@@ -5,7 +5,6 @@ import 'package:flutter_scene_editor/flutter_scene_editor.dart';
 import 'package:flutter_scene_editor/src/panels/outliner_panel.dart';
 import 'package:flutter_scene_editor_core/flutter_scene_editor_core.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:scene/schema.dart' show componentPropertyFloatStride;
 import 'package:scene/scene.dart';
 
 bool _gpuAvailable() {
@@ -59,18 +58,25 @@ void main() {
     expect(schema, isNotEmpty);
     final floatNames = [
       for (final def in schema)
-        if (componentPropertyFloatStride(def.kind) != null) def.name,
+        if (def.effectiveFloatStride != null) def.name,
     ];
     expect(
       floatNames,
-      containsAll(['maxParticles', 'emitRate', 'gravity', 'duration']),
+      containsAll([
+        'maxParticles',
+        'emitRate',
+        'gravity',
+        'duration',
+        'lifetime',
+        'startColor',
+      ]),
       reason:
           'particleEmitter must expose authorable float properties '
           '(drives the outliner expansion gate)',
     );
-    // Sanity: the distribution-kind fields stay out of the float subset.
-    expect(floatNames, isNot(contains('lifetime')));
-    expect(floatNames, isNot(contains('startColor')));
+    // Sanity: non-scalar structured kinds stay out of the float subset.
+    expect(floatNames, isNot(contains('velocityOverLifetime')));
+    expect(floatNames, isNot(contains('colorOverLifetime')));
   });
 
   if (!_gpuAvailable()) {

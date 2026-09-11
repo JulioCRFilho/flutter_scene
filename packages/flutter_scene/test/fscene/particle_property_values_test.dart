@@ -90,6 +90,16 @@ void main() {
       expect(d, isA<ConstantFloat>());
       expect((d as ConstantFloat).value, 7.0);
     });
+
+    test('DoubleValue and IntValue decode to a ConstantFloat', () {
+      final d1 = decodeFloatDistribution(const DoubleValue(4.2));
+      expect(d1, isA<ConstantFloat>());
+      expect((d1 as ConstantFloat).value, 4.2);
+
+      final d2 = decodeFloatDistribution(const IntValue(10));
+      expect(d2, isA<ConstantFloat>());
+      expect((d2 as ConstantFloat).value, 10.0);
+    });
   });
 
   group('ColorDistribution round-trip', () {
@@ -138,6 +148,20 @@ void main() {
       expect(d, isA<ConstantColor>());
       expect((d as ConstantColor).color.x, closeTo(0.0, 1e-6));
       expect(d.color.w, closeTo(1.0, 1e-6));
+    });
+
+    test('ColorValue and Vec4Value decode to a ConstantColor', () {
+      final d1 = decodeColorDistribution(const ColorValue(0.2, 0.4, 0.6, 0.8));
+      expect(d1, isA<ConstantColor>());
+      final c1 = (d1 as ConstantColor).color;
+      expect(c1.x, closeTo(0.2, 1e-6));
+      expect(c1.y, closeTo(0.4, 1e-6));
+      expect(c1.z, closeTo(0.6, 1e-6));
+      expect(c1.w, closeTo(0.8, 1e-6));
+
+      final d2 = decodeColorDistribution(Vec4Value(Vector4(1, 0, 0, 1)));
+      expect(d2, isA<ConstantColor>());
+      expect((d2 as ConstantColor).color, Vector4(1, 0, 0, 1));
     });
   });
 }

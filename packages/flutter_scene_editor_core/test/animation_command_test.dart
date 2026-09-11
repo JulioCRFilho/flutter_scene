@@ -1186,6 +1186,98 @@ void main() {
         expect(h.doc.animations[animId]!.channels, hasLength(2));
       });
 
+      test('validates distribution properties with custom floatStride', () {
+        const emitterSchema = ComponentSchema(
+          'particleEmitter',
+          properties: [
+            ComponentPropertyDef(
+              'lifetime',
+              ComponentPropertyKind.distribution,
+              floatStride: 1,
+            ),
+            ComponentPropertyDef(
+              'startColor',
+              ComponentPropertyKind.distribution,
+              floatStride: 4,
+            ),
+            ComponentPropertyDef(
+              'otherDistribution',
+              ComponentPropertyKind.distribution,
+            ),
+          ],
+        );
+        final h = _harness(
+          componentSchema: (t) => t == 'particleEmitter' ? emitterSchema : null,
+        );
+        final emitterNode = _addCube(h, 'Emitter');
+        _run(h, 'createAnimation', {'name': 'Sparks'});
+        final animId = h.doc.animations.keys.last;
+
+        // Keying lifetime (floatStride: 1) succeeds
+        _run(h, 'setAnimationKeyframe', {
+          'animationId': animId.toToken(),
+          'nodeId': emitterNode.toToken(),
+          'property': 'componentProperty',
+          'componentType': 'particleEmitter',
+          'componentProperty': 'lifetime',
+          'time': 0.0,
+          'value': [2.5],
+        });
+        expect(h.doc.animations[animId]!.channels, hasLength(1));
+
+        // Keying startColor (floatStride: 4) succeeds
+        _run(h, 'setAnimationKeyframe', {
+          'animationId': animId.toToken(),
+          'nodeId': emitterNode.toToken(),
+          'property': 'componentProperty',
+          'componentType': 'particleEmitter',
+          'componentProperty': 'startColor',
+          'time': 0.0,
+          'value': [1.0, 0.5, 0.2, 1.0],
+        });
+        expect(h.doc.animations[animId]!.channels, hasLength(2));
+
+        // Mismatched stride for lifetime (expected 1, got 2)
+        expect(
+          () => _run(h, 'setAnimationKeyframe', {
+            'animationId': animId.toToken(),
+            'nodeId': emitterNode.toToken(),
+            'property': 'componentProperty',
+            'componentType': 'particleEmitter',
+            'componentProperty': 'lifetime',
+            'time': 1.0,
+            'value': [1.0, 2.0],
+          }),
+          throwsA(
+            isA<CommandException>().having(
+              (e) => '$e',
+              'message',
+              contains('expects 1 float(s)'),
+            ),
+          ),
+        );
+
+        // otherDistribution without floatStride cannot be keyed as float row
+        expect(
+          () => _run(h, 'setAnimationKeyframe', {
+            'animationId': animId.toToken(),
+            'nodeId': emitterNode.toToken(),
+            'property': 'componentProperty',
+            'componentType': 'particleEmitter',
+            'componentProperty': 'otherDistribution',
+            'time': 0.0,
+            'value': [1.0],
+          }),
+          throwsA(
+            isA<CommandException>().having(
+              (e) => '$e',
+              'message',
+              contains('structured kind'),
+            ),
+          ),
+        );
+      });
+
       test('move and remove component keyframes with componentType and componentProperty', () {
         final h = _harness();
         final node = _addCube(h, 'Light');

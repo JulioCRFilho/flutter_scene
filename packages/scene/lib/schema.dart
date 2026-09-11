@@ -9,6 +9,7 @@ export 'src/schema/component_schema.dart'
         ComponentPropertyDef,
         ComponentPropertyKind,
         ComponentSchema,
+        componentPropertyDefFloatStride,
         componentPropertyFloatStride,
         decodeComponentSchemas,
         encodeComponentSchemas;

@@ -115,6 +115,8 @@ FloatDistribution decodeFloatDistribution(
   PropertyValue? value, {
   double fallback = 0.0,
 }) {
+  if (value is DoubleValue) return ConstantFloat(value.value);
+  if (value is IntValue) return ConstantFloat(value.value.toDouble());
   if (value is! MapValue) return ConstantFloat(fallback);
   final m = value.values;
   final kind = m['kind'] is StringValue
@@ -165,6 +167,12 @@ ColorDistribution decodeColorDistribution(
   Vector4? fallback,
 }) {
   final fallbackColor = fallback ?? Vector4(1, 1, 1, 1);
+  if (value is ColorValue) {
+    return ConstantColor(Vector4(value.r, value.g, value.b, value.a));
+  }
+  if (value is Vec4Value) {
+    return ConstantColor(value.value.clone());
+  }
   if (value is! MapValue) return ConstantColor(fallbackColor);
   final m = value.values;
   final kind = m['kind'] is StringValue

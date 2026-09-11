@@ -533,12 +533,12 @@ class EditorController extends ChangeNotifier
 
   /// The declared, float-encodable component properties of [type] — the
   /// subset the animation panel can author as `componentProperty` channels
-  /// (one float row per keyframe). Structured kinds (distribution, curve,
-  /// gradient, object, union, string) stay out: their values serialize as
-  /// keyframe blobs, which the panel's float-value keying does not author.
+  /// (one float row per keyframe). Properties without a declared float stride
+  /// stay out: their values serialize as keyframe blobs, which the panel's
+  /// float-value keying does not author.
   List<ComponentPropertyDef> animatableComponentProperties(String type) => [
     for (final def in componentSchema(type))
-      if (componentPropertyFloatStride(def.kind) != null) def,
+      if (def.effectiveFloatStride != null) def,
   ];
 
   /// The full portable schema of component [type], or null when unknown.

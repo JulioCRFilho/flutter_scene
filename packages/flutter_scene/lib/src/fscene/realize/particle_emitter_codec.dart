@@ -608,14 +608,19 @@ ComponentField<C> _distributionField<C extends Component>(
   double defaultValue,
   String doc,
   FloatDistribution Function(C component) get,
+  void Function(C component, FloatDistribution value) set,
 ) => ComponentField(
   ComponentPropertyDef(
     name,
     ComponentPropertyKind.distribution,
+    floatStride: 1,
     defaultValue: encodeFloatDistribution(ConstantFloat(defaultValue)),
     doc: doc,
   ),
   read: (c, _) => encodeFloatDistribution(get(c)),
+  write: (c, v, _) {
+    set(c, decodeFloatDistribution(v, fallback: defaultValue));
+  },
 );
 
 /// The [ParticleSystem] configuration fields shared by the sprite and mesh
@@ -667,39 +672,49 @@ List<ComponentField<C>> particleSystemFields<C extends Component>(
     _kLifetime,
     'Seconds each particle lives.',
     (c) => systemOf(c).lifetime,
+    (c, v) => systemOf(c).lifetime = v,
   ),
   _distributionField(
     'startSpeed',
     _kStartSpeed,
     'Initial speed along the emission direction.',
     (c) => systemOf(c).startSpeed,
+    (c, v) => systemOf(c).startSpeed = v,
   ),
   _distributionField(
     'startSize',
     _kStartSize,
     'Initial particle size in world units.',
     (c) => systemOf(c).startSize,
+    (c, v) => systemOf(c).startSize = v,
   ),
   _distributionField(
     'startRotation',
     0,
     'Initial rotation in radians.',
     (c) => systemOf(c).startRotation,
+    (c, v) => systemOf(c).startRotation = v,
   ),
   _distributionField(
     'startAngularVelocity',
     0,
     'Initial rotation rate in radians per second.',
     (c) => systemOf(c).startAngularVelocity,
+    (c, v) => systemOf(c).startAngularVelocity = v,
   ),
   ComponentField(
     ComponentPropertyDef(
       'startColor',
       ComponentPropertyKind.distribution,
+      floatStride: 4,
       defaultValue: encodeColorDistribution(ConstantColor(_opaqueWhite())),
       doc: 'Color assigned at spawn.',
     ),
     read: (c, _) => encodeColorDistribution(systemOf(c).startColor),
+    write: (c, v, _) {
+      systemOf(c).startColor =
+          decodeColorDistribution(v, fallback: _opaqueWhite());
+    },
   ),
   ComponentField.vec3(
     'gravity',

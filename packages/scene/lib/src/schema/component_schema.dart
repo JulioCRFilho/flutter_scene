@@ -117,6 +117,12 @@ int? componentPropertyFloatStride(ComponentPropertyKind kind) {
   }
 }
 
+/// The float count one keyframe occupies for [def], taking into account any
+/// explicit [ComponentPropertyDef.floatStride] override or falling back to
+/// [componentPropertyFloatStride(def.kind)].
+int? componentPropertyDefFloatStride(ComponentPropertyDef def) =>
+    def.effectiveFloatStride;
+
 /// A declared, editable property of a component type: the single source of
 /// truth for its name, carried kind, default, constraints, and docs.
 class ComponentPropertyDef {
@@ -136,6 +142,7 @@ class ComponentPropertyDef {
     this.objectFields,
     this.unionTag = 'kind',
     this.unionVariants,
+    this.floatStride,
   });
 
   /// The property key in the component spec's properties bag.
@@ -143,6 +150,17 @@ class ComponentPropertyDef {
 
   /// The property's editable type.
   final ComponentPropertyKind kind;
+
+  /// Explicit keyframe float stride for properties that can be animated as a
+  /// float row (e.g. constant scalar distribution = 1, constant color
+  /// distribution = 4). When null, falls back to
+  /// [componentPropertyFloatStride(kind)].
+  final int? floatStride;
+
+  /// The effective float stride for keyframing, either explicitly configured
+  /// on this definition via [floatStride] or derived from [kind].
+  int? get effectiveFloatStride =>
+      floatStride ?? componentPropertyFloatStride(kind);
 
   /// The value used when the property is absent from a spec, or null for a
   /// required property with no default (a mesh's geometry reference).

@@ -10,7 +10,13 @@ import 'package:flutter_scene/scene.dart';
 // The channel/resolver data model is internal; tests reach it directly.
 // ignore: implementation_imports
 import 'package:flutter_scene/src/animation.dart'
-    show AnimationChannel, AnimationProperty, BindKey, PropertyResolver;
+    show
+        AnimationChannel,
+        AnimationProperty,
+        BindKey,
+        ComponentPropertyResolver,
+        PropertyResolver;
+import 'package:scene/scene.dart' hide AnimationProperty;
 import 'package:scene/schema.dart' show ComponentPropertyKind;
 import 'package:test/test.dart';
 import 'package:vector_math/vector_math.dart';
@@ -378,6 +384,69 @@ void main() {
       final clip = AnimationClip(_animationTargeting(['hip']), good);
       final wrong = Node(name: 'mesh');
       expect(() => clip.rebind(wrong), throwsA(isA<StateError>()));
+    });
+  });
+
+  group('distribution component property resolution', () {
+    test('resolves scalar distribution timeline with floatStride: 1', () {
+      final resolver = PropertyResolver.makeComponentPropertyTimeline(
+        [0.0, 1.0],
+        Float32List.fromList([2.0, 8.0]),
+        kind: ComponentPropertyKind.distribution,
+        componentType: 'particleEmitter',
+        propertyName: 'lifetime',
+        floatStride: 1,
+      ) as ComponentPropertyResolver;
+
+      expect(resolver.kind, ComponentPropertyKind.distribution);
+      expect(resolver.isFloatEncodable, isFalse);
+
+      final val0 = resolver.evaluateAt(0.0);
+      expect(val0, isA<DoubleValue>());
+      expect((val0 as DoubleValue).value, closeTo(2.0, 1e-6));
+
+      final valMid = resolver.evaluateAt(0.5);
+      expect(valMid, isA<DoubleValue>());
+      expect((valMid as DoubleValue).value, closeTo(5.0, 1e-6));
+
+      final val1 = resolver.evaluateAt(1.0);
+      expect(val1, isA<DoubleValue>());
+      expect((val1 as DoubleValue).value, closeTo(8.0, 1e-6));
+    });
+
+    test('resolves color distribution timeline with floatStride: 4', () {
+      final resolver = PropertyResolver.makeComponentPropertyTimeline(
+        [0.0, 1.0],
+        Float32List.fromList([0.0, 0.2, 0.4, 0.6, 1.0, 0.8, 0.6, 0.4]),
+        kind: ComponentPropertyKind.distribution,
+        componentType: 'particleEmitter',
+        propertyName: 'startColor',
+        floatStride: 4,
+      ) as ComponentPropertyResolver;
+
+      final val0 = resolver.evaluateAt(0.0);
+      expect(val0, isA<ColorValue>());
+      final c0 = val0 as ColorValue;
+      expect(c0.r, closeTo(0.0, 1e-6));
+      expect(c0.g, closeTo(0.2, 1e-6));
+      expect(c0.b, closeTo(0.4, 1e-6));
+      expect(c0.a, closeTo(0.6, 1e-6));
+
+      final valMid = resolver.evaluateAt(0.5);
+      expect(valMid, isA<ColorValue>());
+      final cMid = valMid as ColorValue;
+      expect(cMid.r, closeTo(0.5, 1e-6));
+      expect(cMid.g, closeTo(0.5, 1e-6));
+      expect(cMid.b, closeTo(0.5, 1e-6));
+      expect(cMid.a, closeTo(0.5, 1e-6));
+
+      final val1 = resolver.evaluateAt(1.0);
+      expect(val1, isA<ColorValue>());
+      final c1 = val1 as ColorValue;
+      expect(c1.r, closeTo(1.0, 1e-6));
+      expect(c1.g, closeTo(0.8, 1e-6));
+      expect(c1.b, closeTo(0.6, 1e-6));
+      expect(c1.a, closeTo(0.4, 1e-6));
     });
   });
 }

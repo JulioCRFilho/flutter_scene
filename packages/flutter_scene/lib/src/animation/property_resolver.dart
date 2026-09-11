@@ -116,8 +116,10 @@ abstract class PropertyResolver {
     required String propertyName,
     TimelineInterpolation interpolation = TimelineInterpolation.linear,
     Uint8List? keyframesBlobPayload,
+    int? floatStride,
   }) {
-    if (componentPropertyFloatStride(kind) != null) {
+    final stride = floatStride ?? componentPropertyFloatStride(kind);
+    if (stride != null) {
       return _SimpleComponentPropertyResolver._(
         times: times,
         values: keyframes.toList(),
@@ -125,6 +127,7 @@ abstract class PropertyResolver {
         componentTypeValue: componentType,
         propertyNameValue: propertyName,
         interpolation: interpolation,
+        strideOverride: stride,
       );
     }
     final blob = keyframesBlobPayload;
@@ -547,9 +550,9 @@ List<PropertyValue> decodeComponentPropertyKeyframesBlob(Uint8List? bytes) {
 abstract class ComponentPropertyResolver extends TimelineResolver {
   /// Creates a component property resolver.
   ComponentPropertyResolver._(
-    List<double> times,
-    TimelineInterpolation interpolation,
-  ) : super._(times, interpolation);
+    super.times,
+    super.interpolation,
+  ) : super._();
 
   /// The animated property's kind (see [ComponentPropertyKind]).
   ComponentPropertyKind get kind;
@@ -606,6 +609,7 @@ class _SimpleComponentPropertyResolver extends ComponentPropertyResolver {
   final ComponentPropertyKind _kindValue;
   final String _componentTypeValue;
   final String _propertyNameValue;
+  final int _stride;
 
   _SimpleComponentPropertyResolver._({
     required List<double> times,
@@ -614,16 +618,17 @@ class _SimpleComponentPropertyResolver extends ComponentPropertyResolver {
     required String componentTypeValue,
     required String propertyNameValue,
     TimelineInterpolation interpolation = TimelineInterpolation.linear,
+    int? strideOverride,
   }) : _values = Float32List.fromList(values),
        _kindValue = kindValue,
        _componentTypeValue = componentTypeValue,
        _propertyNameValue = propertyNameValue,
+       _stride = strideOverride ?? componentPropertyFloatStride(kindValue)!,
        super._(times, interpolation) {
-    final int stride = componentPropertyFloatStride(_kindValue)!;
     assert(
-      _values.isEmpty || _values.length == times.length * stride,
+      _values.isEmpty || _values.length == times.length * _stride,
       'Component property "$_propertyNameValue" keyframe payload must hold '
-      '$stride float(s) per keyframe (${times.length} keys), '
+      '$_stride float(s) per keyframe (${times.length} keys), '
       'got ${_values.length} floats',
     );
   }
@@ -642,7 +647,7 @@ class _SimpleComponentPropertyResolver extends ComponentPropertyResolver {
 
   @override
   PropertyValue evaluate(double time, double weight) {
-    final int stride = componentPropertyFloatStride(_kindValue)!;
+    final int stride = _stride;
     if (_times.isEmpty || _values.isEmpty) {
       return _build(_neutralSlots());
     }
@@ -667,7 +672,7 @@ class _SimpleComponentPropertyResolver extends ComponentPropertyResolver {
 
   /// The [stride] value slots of keyframe [index].
   List<double> _slotsAt(int index) {
-    final stride = componentPropertyFloatStride(_kindValue)!;
+    final stride = _stride;
     return [
       for (var i = 0; i < stride; i++) _values[index * stride + i],
     ];
@@ -723,6 +728,10 @@ class _SimpleComponentPropertyResolver extends ComponentPropertyResolver {
         return ColorValue(slots[0], slots[1], slots[2], slots[3]);
       case ComponentPropertyKind.matrix4:
         return Matrix4Value(Matrix4.fromFloat32List(Float32List.fromList(slots)));
+      case ComponentPropertyKind.distribution:
+        return _stride == 4
+            ? ColorValue(slots[0], slots[1], slots[2], slots[3])
+            : DoubleValue(slots.first);
       default:
         throw StateError('Unhandled kind $_kindValue');
     }
@@ -739,7 +748,9 @@ class _SimpleComponentPropertyResolver extends ComponentPropertyResolver {
             0, 0, 1, 0, //
             0, 0, 0, 1,
           ],
-        _ => List.filled(componentPropertyFloatStride(_kindValue)!, 0.0),
+        ComponentPropertyKind.distribution =>
+          _stride == 4 ? const [1.0, 1.0, 1.0, 1.0] : const [0.0],
+        _ => List.filled(_stride, 0.0),
       };
 }
 

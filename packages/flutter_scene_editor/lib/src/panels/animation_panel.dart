@@ -960,8 +960,20 @@ class _AnimationPanelState extends State<AnimationPanel> {
     ],
     ColorValue() => [value.r, value.g, value.b, value.a],
     Matrix4Value() => [...value.value.storage],
+    MapValue() => _floatSlotsFromMap(value),
     _ => const <double>[],
   };
+
+  List<double> _floatSlotsFromMap(MapValue map) {
+    final kind = map.values['kind'];
+    if (kind == null || (kind is StringValue && kind.value == 'constant')) {
+      final val = map.values['value'];
+      if (val != null) return _floatSlots(val);
+      final col = map.values['color'];
+      if (col != null) return _floatSlots(col);
+    }
+    return const <double>[];
+  }
 
   /// The pose the channel's live target currently shows, as the value map
   /// `setAnimationKeyframe` accepts.
