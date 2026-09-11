@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'package:flutter_scene/fscene.dart' show defaultComponentRegistry;
 import 'package:scene/scene.dart';
 import 'package:flutter_scene_editor_core/flutter_scene_editor_core.dart';
 import 'package:flutter_scene_mcp/flutter_scene_mcp.dart';
@@ -628,6 +629,110 @@ void main() {
       expect(summaryChannel['property'], 'componentProperty');
       expect(summaryChannel['componentType'], 'particleEmitter');
       expect(summaryChannel['componentProperty'], 'maxParticles');
+    });
+
+    test('particleEmitter startColor (stride 4) integrates with MCP tools', () async {
+      final session = EditorSession(
+        SceneDocument(allocator: IdAllocator(session: 1)),
+      );
+      session.componentSchemaLookup = (type) =>
+          defaultComponentRegistry().codecFor(type)?.schema;
+      final surface = EditorToolSurface(
+        () => session,
+        describeComponentType: (type) =>
+            defaultComponentRegistry().codecFor(type)?.schema.toJson(),
+        listComponentTypes: () => [
+          {'type': 'particleEmitter', 'provenance': 'registered'},
+        ],
+      );
+
+      // 1. describe_component_type reports floatStride 4
+      final desc = await surface.dispatch('describe_component_type', {
+        'type': 'particleEmitter',
+      });
+      final props = (desc['properties'] as List).cast<Map<String, Object?>>();
+      final startColorProp = props.firstWhere((p) => p['name'] == 'startColor');
+      expect(startColorProp['kind'], 'distribution');
+      expect(startColorProp['floatStride'], 4);
+
+      // 2. run_command creates node and adds particleEmitter with startColor
+      await surface.dispatch('run_command', {
+        'command': 'createNode',
+        'params': {'name': 'Emitter'},
+      });
+      final nodeId = await _firstRootId(surface);
+      await surface.dispatch('run_command', {
+        'command': 'addComponent',
+        'params': {
+          'nodeId': nodeId,
+          'componentType': 'particleEmitter',
+          'properties': {
+            'startColor': {
+              'kind': 'constant',
+              'color': {'r': 0.8, 'g': 0.2, 'b': 0.4, 'a': 0.9},
+            },
+          },
+        },
+      });
+
+      // 3. get_node reports startColor and distribution kind
+      final nodeDetail = await surface.dispatch('get_node', {'ref': nodeId});
+      final comps = (nodeDetail['components'] as List).cast<Map<String, Object?>>();
+      final emitterComp = comps.firstWhere((c) => c['type'] == 'particleEmitter');
+      expect((emitterComp['kinds'] as Map<String, Object?>)['startColor'], 'distribution');
+
+      // 4. setAnimationKeyframe validates float stride
+      await surface.dispatch('run_command', {'command': 'createAnimation'});
+      final animId = (((await surface.dispatch('list_animations', {}))['animations']
+              as List)
+          .single as Map)['id'] as String;
+
+      // 1 float is rejected because floatStride is 4
+      expect(
+        () => surface.dispatch('run_command', {
+          'command': 'setAnimationKeyframe',
+          'params': {
+            'animationId': animId,
+            'nodeId': nodeId,
+            'property': 'componentProperty',
+            'componentType': 'particleEmitter',
+            'componentProperty': 'startColor',
+            'time': 0.0,
+            'value': [1.0],
+          },
+        }),
+        throwsA(isA<ToolError>().having(
+          (e) => e.message,
+          'message',
+          contains('expects 4 float(s) per keyframe, got 1'),
+        )),
+      );
+
+      // 4 floats succeed
+      await surface.dispatch('run_command', {
+        'command': 'setAnimationKeyframe',
+        'params': {
+          'animationId': animId,
+          'nodeId': nodeId,
+          'property': 'componentProperty',
+          'componentType': 'particleEmitter',
+          'componentProperty': 'startColor',
+          'time': 0.0,
+          'value': [0.8, 0.2, 0.4, 0.9],
+        },
+      });
+
+      // 5. get_animation decodes 4D vector {x, y, z, w}
+      final animDetail = await surface.dispatch('get_animation', {'ref': animId});
+      final channel = (animDetail['channels'] as List).single as Map;
+      expect(channel['componentProperty'], 'startColor');
+      final keyframes = channel['keyframes'] as List;
+      expect(keyframes, hasLength(1));
+      final val = (keyframes.single as Map)['value'] as Map;
+      expect(val['x'], closeTo(0.8, 1e-5));
+      expect(val['y'], closeTo(0.2, 1e-5));
+      expect(val['z'], closeTo(0.4, 1e-5));
+      expect(val['w'], closeTo(0.9, 1e-5));
     });
 
     test('get_animation on a missing ref throws ToolError', () {
