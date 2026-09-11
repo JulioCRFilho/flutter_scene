@@ -712,8 +712,25 @@ List<ComponentField<C>> particleSystemFields<C extends Component>(
     ),
     read: (c, _) => encodeColorDistribution(systemOf(c).startColor),
     write: (c, v, _) {
-      systemOf(c).startColor =
-          decodeColorDistribution(v, fallback: _opaqueWhite());
+      final newColor = decodeColorDistribution(v, fallback: _opaqueWhite());
+      final sys = systemOf(c);
+      sys.startColor = newColor;
+      final s = sys.storage;
+      final tmp = Vector4.zero();
+      for (var i = 0; i < s.aliveCount; i++) {
+        final col = newColor.sample(0.0, s.randomFor(i, 23), tmp);
+        s.baseColorR[i] = col.x;
+        s.baseColorG[i] = col.y;
+        s.baseColorB[i] = col.z;
+        s.baseColorA[i] = col.w;
+        s.colorR[i] = col.x;
+        s.colorG[i] = col.y;
+        s.colorB[i] = col.z;
+        s.colorA[i] = col.w;
+      }
+      if (c is ParticleEmitterComponent) {
+        c.repack();
+      }
     },
   ),
   ComponentField.vec3(

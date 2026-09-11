@@ -92,6 +92,10 @@ class ParticleEmitterComponent extends MeshComponent {
     _repack();
   }
 
+  /// Forces live particle state to be repacked into the billboard instance
+  /// buffer immediately (e.g. after a live property edit while paused).
+  void repack() => _repack();
+
   // Copies the live particle columns into the billboard instance buffer.
   void _repack() {
     final s = system.storage;

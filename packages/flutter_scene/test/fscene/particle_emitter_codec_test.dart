@@ -199,6 +199,23 @@ void main() {
       expect(out.x, closeTo(1.0, 1e-6));
       expect(out.w, closeTo(1.0, 1e-6));
     });
+
+    test('absent colorOverLife leaves stepped particles at startColor', () {
+      final s = particleSystemFromProperties({
+        'emitRate': const DoubleValue(60.0),
+        'startColor': encodeColorDistribution(
+          ConstantColor(Vector4(1.0, 0.2, 0.3, 0.8)),
+        ),
+      });
+      s.step(0.5);
+      expect(s.storage.aliveCount, greaterThan(0));
+      for (var i = 0; i < s.storage.aliveCount; i++) {
+        expect(s.storage.colorR[i], closeTo(1.0, 1e-5));
+        expect(s.storage.colorG[i], closeTo(0.2, 1e-5));
+        expect(s.storage.colorB[i], closeTo(0.3, 1e-5));
+        expect(s.storage.colorA[i], closeTo(0.8, 1e-5));
+      }
+    });
   });
 
   group('shape union round-trip', () {

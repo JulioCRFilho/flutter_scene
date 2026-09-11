@@ -1,6 +1,7 @@
 import 'package:flutter_scene/fscene.dart'
     show defaultComponentRegistry, RealizeContext, SerializeContext;
 import 'package:flutter_scene/scene.dart';
+import 'package:flutter_scene/src/fscene/realize/particle_property_values.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:scene/scene.dart';
 import 'package:vector_math/vector_math.dart';
@@ -187,5 +188,40 @@ void main() {
       isTrue,
     );
     expect(liveValue(component, 'maxParticles'), const IntValue(100));
+  });
+
+  test('startColor writes through and updates live particles', () {
+    final component = emitter({'emitRate': const DoubleValue(60.0)});
+    component.system.step(0.5);
+    expect(component.system.storage.aliveCount, greaterThan(0));
+
+    final newColor = encodeColorDistribution(
+      ConstantColor(Vector4(0.8, 0.2, 0.4, 0.9)),
+    );
+    expect(
+      codec.writeLiveProperty(
+        component,
+        'startColor',
+        newColor,
+        RealizeContext(SceneDocument()),
+      ),
+      isTrue,
+    );
+
+    final s = component.system.storage;
+    for (var i = 0; i < s.aliveCount; i++) {
+      expect(s.colorR[i], closeTo(0.8, 1e-5));
+      expect(s.colorG[i], closeTo(0.2, 1e-5));
+      expect(s.colorB[i], closeTo(0.4, 1e-5));
+      expect(s.colorA[i], closeTo(0.9, 1e-5));
+    }
+
+    component.system.step(0.1);
+    for (var i = 0; i < s.aliveCount; i++) {
+      expect(s.colorR[i], closeTo(0.8, 1e-5));
+      expect(s.colorG[i], closeTo(0.2, 1e-5));
+      expect(s.colorB[i], closeTo(0.4, 1e-5));
+      expect(s.colorA[i], closeTo(0.9, 1e-5));
+    }
   });
 }

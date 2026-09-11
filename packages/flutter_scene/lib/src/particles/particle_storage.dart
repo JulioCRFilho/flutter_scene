@@ -38,6 +38,10 @@ class ParticleStorage {
       colorG = Float32List(capacity),
       colorB = Float32List(capacity),
       colorA = Float32List(capacity),
+      baseColorR = Float32List(capacity)..fillRange(0, capacity, 1.0),
+      baseColorG = Float32List(capacity)..fillRange(0, capacity, 1.0),
+      baseColorB = Float32List(capacity)..fillRange(0, capacity, 1.0),
+      baseColorA = Float32List(capacity)..fillRange(0, capacity, 1.0),
       frame = Float32List(capacity),
       axisX = Float32List(capacity),
       axisY = Float32List(capacity),
@@ -70,6 +74,9 @@ class ParticleStorage {
 
   /// Current linear RGBA color (premultiplication happens in the shader).
   Float32List colorR, colorG, colorB, colorA;
+
+  /// Base linear RGBA color set at spawn, which color-over-life modulates.
+  Float32List baseColorR, baseColorG, baseColorB, baseColorA;
 
   /// Flipbook frame index (fractional values round to the nearest cell). Left
   /// at zero unless a module (or spawn code) writes it.
@@ -114,6 +121,18 @@ class ParticleStorage {
         Float32List(newCapacity)..setRange(0, _aliveCount, colorB);
     final newColorA =
         Float32List(newCapacity)..setRange(0, _aliveCount, colorA);
+    final newBaseColorR =
+        Float32List(newCapacity)..fillRange(0, newCapacity, 1.0);
+    newBaseColorR.setRange(0, _aliveCount, baseColorR);
+    final newBaseColorG =
+        Float32List(newCapacity)..fillRange(0, newCapacity, 1.0);
+    newBaseColorG.setRange(0, _aliveCount, baseColorG);
+    final newBaseColorB =
+        Float32List(newCapacity)..fillRange(0, newCapacity, 1.0);
+    newBaseColorB.setRange(0, _aliveCount, baseColorB);
+    final newBaseColorA =
+        Float32List(newCapacity)..fillRange(0, newCapacity, 1.0);
+    newBaseColorA.setRange(0, _aliveCount, baseColorA);
     final newFrame = Float32List(newCapacity)..setRange(0, _aliveCount, frame);
     final newAxisX = Float32List(newCapacity)..setRange(0, _aliveCount, axisX);
     final newAxisY = Float32List(newCapacity)..setRange(0, _aliveCount, axisY);
@@ -138,6 +157,10 @@ class ParticleStorage {
     colorG = newColorG;
     colorB = newColorB;
     colorA = newColorA;
+    baseColorR = newBaseColorR;
+    baseColorG = newBaseColorG;
+    baseColorB = newBaseColorB;
+    baseColorA = newBaseColorA;
     frame = newFrame;
     axisX = newAxisX;
     axisY = newAxisY;
@@ -208,6 +231,10 @@ class ParticleStorage {
     colorG[to] = colorG[from];
     colorB[to] = colorB[from];
     colorA[to] = colorA[from];
+    baseColorR[to] = baseColorR[from];
+    baseColorG[to] = baseColorG[from];
+    baseColorB[to] = baseColorB[from];
+    baseColorA[to] = baseColorA[from];
     frame[to] = frame[from];
     axisX[to] = axisX[from];
     axisY[to] = axisY[from];

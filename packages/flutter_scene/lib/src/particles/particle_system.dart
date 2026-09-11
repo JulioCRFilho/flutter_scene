@@ -256,6 +256,10 @@ class ParticleSystem {
     s.colorG[index] = c.y;
     s.colorB[index] = c.z;
     s.colorA[index] = c.w;
+    s.baseColorR[index] = c.x;
+    s.baseColorG[index] = c.y;
+    s.baseColorB[index] = c.z;
+    s.baseColorA[index] = c.w;
 
     // Slots are reused, so clear the frame a prior occupant may have left.
     s.frame[index] = 0.0;

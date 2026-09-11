@@ -100,8 +100,9 @@ class SizeOverLifeModule extends ParticleModule {
   }
 }
 
-/// Sets each particle's color from a [ColorDistribution] sampled over its
-/// normalized age (color over life).
+/// Scales each particle's color by a [ColorDistribution] sampled over its
+/// normalized age, relative to the color set at spawn (`color = baseColor *
+/// colorOverLife(age / lifetime)`).
 /// {@category Particles}
 class ColorOverLifeModule extends ParticleModule {
   /// Creates a color-over-life force driven by [color].
@@ -119,10 +120,10 @@ class ColorOverLifeModule extends ParticleModule {
       final life = storage.lifetime[i];
       final nAge = life > 0.0 ? storage.age[i] / life : 0.0;
       color.sample(nAge, storage.random01[i], _tmp);
-      storage.colorR[i] = _tmp.x;
-      storage.colorG[i] = _tmp.y;
-      storage.colorB[i] = _tmp.z;
-      storage.colorA[i] = _tmp.w;
+      storage.colorR[i] = storage.baseColorR[i] * _tmp.x;
+      storage.colorG[i] = storage.baseColorG[i] * _tmp.y;
+      storage.colorB[i] = storage.baseColorB[i] * _tmp.z;
+      storage.colorA[i] = storage.baseColorA[i] * _tmp.w;
     }
   }
 }
