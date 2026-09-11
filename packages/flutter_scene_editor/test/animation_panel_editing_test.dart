@@ -160,6 +160,55 @@ void main() {
     }
   });
 
+  testWidgets('Keying a component property at its schema default keys the default', (
+    tester,
+  ) async {
+    // Delta persistence serializes no value for a property still sitting at
+    // its default, so the fresh component spec reads as having none. Keying
+    // must fall back to the schema default (what the live component holds)
+    // rather than refusing — this is the exact shape of adding a fresh
+    // particleEmitter/light and immediately keying one of its properties.
+    final (controller, animationId, nodeId) = await pumpEditablePanel(
+      tester,
+      components: [ComponentSpec('directionalLight')],
+    );
+    controller.selectPreviewAnimation(animationId);
+
+    controller.selectComponentProperty(nodeId, 'directionalLight', 'intensity');
+    await tester.pump();
+    await tester.tap(find.text('Key'));
+    await tester.pumpAndSettle();
+
+    final spec = controller.document.animations[animationId]!;
+    final channel = spec.channels.singleWhere(
+      (ch) =>
+          ch.property == AnimationProperty.componentProperty &&
+          ch.componentType == 'directionalLight' &&
+          ch.componentProperty == 'intensity',
+    );
+    final times = channelTimes(controller.document, channel);
+    expect(times.map((t) => (t * 100).roundToDouble() / 100), [0.0, 1.0]);
+    final bytes = controller.document.payload(channel.keyframes)!.bytes!;
+    final values = bytes.buffer.asFloat32List(
+      bytes.offsetInBytes,
+      bytes.lengthInBytes ~/ 4,
+    );
+    // Every seeded key carries the schema default, not zeros.
+    final def = controller
+        .animatableComponentProperties('directionalLight')
+        .firstWhere((d) => d.name == 'intensity');
+    final expected = switch (def.defaultValue!) {
+      DoubleValue(:final value) => value,
+      final other => throw StateError('Unexpected default $other'),
+    };
+    for (final value in values) {
+      expect(value, closeTo(expected, 1e-4));
+    }
+
+    // And the node's timeline lists the new lane under its title.
+    expect(painterRowTitles(tester), contains('directionalLight.intensity'));
+  });
+
   testWidgets('a bone\'s lanes stay in translation → rotation → scale order', (
     tester,
   ) async {

@@ -712,21 +712,24 @@ class _AnimationPanelState extends State<AnimationPanel> {
       if (channel.property == AnimationProperty.componentProperty) {
         // Component property keys carry the float-encoded value read from the
         // document (what the inspector shows): the authored value, not a pose.
+        // A property still at its schema default has none serialized; the
+        // default keys in its place (the value the component actually holds).
         params['componentType'] = channel.componentType;
         params['componentProperty'] = channel.componentProperty;
-        final value = _componentValueFor(
-          channel.target,
-          channel.componentType,
-          channel.componentProperty,
-        );
+        final value =
+            _componentValueFor(
+              channel.target,
+              channel.componentType,
+              channel.componentProperty,
+            ) ??
+            _defaultSlotsFor(channel.componentType, channel.componentProperty);
         if (value == null) {
           _showError(
             StateError(
               'No authored ${channel.componentType ?? 'component'}.'
               '${channel.componentProperty ?? 'property'} value to key on '
-              '${channel.target.toToken()}; change the property in the '
-              'inspector first (only values stored in the document can be '
-              'captured).',
+              '${channel.target.toToken()}, and the property declares no '
+              'default; change the property in the inspector first.',
             ),
           );
           return;
@@ -764,13 +767,19 @@ class _AnimationPanelState extends State<AnimationPanel> {
     final property = controller.activeComponentProperty;
     if (nodeId == null || type == null || property == null) return;
     final time = controller.previewTime;
-    final value = _componentValueFor(nodeId, type, property);
+    // The authored document value; a property still sitting at its schema
+    // default has none serialized (delta persistence drops defaults), and
+    // keying falls back to that default — the value the emitter actually
+    // holds. The error below is left for types the registry does not know.
+    final value =
+        _componentValueFor(nodeId, type, property) ??
+        _defaultSlotsFor(type, property);
     if (value == null) {
       _showError(
         StateError(
           'No authored $type.$property value to key on '
-          '${nodeId.toToken()}; change the property in the inspector first '
-          '(only values stored in the document can be captured).',
+          '${nodeId.toToken()}, and the property declares no default; change '
+          'the property in the inspector first.',
         ),
       );
       return;
@@ -826,8 +835,7 @@ class _AnimationPanelState extends State<AnimationPanel> {
   /// shows), or null when the node, component, or property has no serialized
   /// value yet. The document serializes only values that differ from the
   /// component's default, so a property sitting at its default reads null —
-  /// callers surface that as a captured-nothing error rather than keying a
-  /// wrongly-sized row of zeros.
+  /// callers fall back to [_defaultSlotsFor] before surfacing an error.
   List<double>? _componentValueFor(
     LocalId nodeId,
     String? componentType,
@@ -842,6 +850,26 @@ class _AnimationPanelState extends State<AnimationPanel> {
       final value = component.properties[componentProperty];
       if (value == null) return null;
       return _floatSlots(value);
+    }
+    return null;
+  }
+
+  /// The float slots of [componentType]'s schema default for [property], from
+  /// the component registry, or null when the type or property is unknown or
+  /// declares no default. This is what keying falls back to for a property
+  /// still sitting at its default (delta persistence serializes no value for
+  /// it) — the default is exactly the value the live component holds, so it
+  /// keys as a well-defined float row rather than a guessed zeros one.
+  List<double>? _defaultSlotsFor(String? componentType, String? property) {
+    if (componentType == null || property == null) return null;
+    for (final def in _controller.componentSchema(componentType)) {
+      if (def.name != property) continue;
+      final value = def.defaultValue;
+      if (value == null) return null;
+      final slots = _floatSlots(value);
+      // A default that does not float-encode (an enum-string, say) offers
+      // nothing keyable; the empty row would be rejected downstream anyway.
+      return slots.isEmpty ? null : slots;
     }
     return null;
   }
