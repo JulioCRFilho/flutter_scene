@@ -2270,7 +2270,14 @@ class EditorToolSurface {
     'duration': _animationDuration(animation),
     'channels': [
       for (final channel in animation.channels)
-        {'target': _channelTarget(channel), 'property': channel.property.name},
+        {
+          'target': _channelTarget(channel),
+          'property': channel.property.name,
+          if (channel.componentType != null)
+            'componentType': channel.componentType,
+          if (channel.componentProperty != null)
+            'componentProperty': channel.componentProperty,
+        },
     ],
   };
 
@@ -2316,46 +2323,109 @@ class EditorToolSurface {
     final valueBytes = session.document.payload(channel.keyframes)?.bytes;
     final floats = valueBytes == null ? Float32List(0) : _floatsOf(valueBytes);
     final cubic = channel.interpolation == AnimationInterpolation.cubic;
-    // Row width per keyframe: transform channels carry one vector (three
-    // for cubic, [inTangent, value, outTangent]); weights channels carry
-    // one weight vector per morph target.
     final isRotation = channel.property == AnimationProperty.rotation;
     final isWeights = channel.property == AnimationProperty.weights;
-    final componentStride = isRotation ? 4 : 3;
+    final isComponent = channel.property == AnimationProperty.componentProperty;
+
+    final List<PropertyValue>? blobValues;
+    if (isComponent && channel.keyframesBlob != null) {
+      final blobBytes = session.document.payload(channel.keyframesBlob!)?.bytes;
+      if (blobBytes != null && blobBytes.isNotEmpty) {
+        final text = blobBytes.offsetInBytes == 0
+            ? utf8.decode(blobBytes)
+            : utf8.decode(Uint8List.fromList(blobBytes));
+        final tree = jsonDecode(text) as List;
+        blobValues = [for (final entry in tree) decodePropertyValue(entry)];
+      } else {
+        blobValues = null;
+      }
+    } else {
+      blobValues = null;
+    }
+
+    final int componentStride;
+    if (isRotation) {
+      componentStride = 4;
+    } else if (isWeights) {
+      componentStride = times.isEmpty ? 0 : floats.length ~/ times.length;
+    } else if (isComponent) {
+      componentStride = times.isEmpty
+          ? 1
+          : (floats.length ~/ times.length) ~/ (cubic ? 3 : 1);
+    } else {
+      componentStride = 3;
+    }
+
     final rowWidth = isWeights
-        ? (times.isEmpty ? 0 : floats.length ~/ times.length)
+        ? componentStride
         : componentStride * (cubic ? 3 : 1);
     final valuesPerKey = isWeights && cubic ? rowWidth ~/ 3 : rowWidth;
-    // The float offset of keyframe [index]'s value slot: cubic rows carry
-    // [inTangent, value, outTangent], so the value sits one component
-    // stride into the row.
+
     int baseOf(int index) =>
         cubic ? index * rowWidth + componentStride : index * rowWidth;
     Object? valueAt(int index) {
+      if (blobValues != null) {
+        return index < blobValues.length
+            ? _propertyJson(blobValues[index])
+            : null;
+      }
       final base = baseOf(index);
-      return switch (channel.property) {
-        AnimationProperty.rotation =>
-          floats.length >= base + 4
+      if (isRotation) {
+        return floats.length >= base + 4
+            ? {
+                'x': floats[base],
+                'y': floats[base + 1],
+                'z': floats[base + 2],
+                'w': floats[base + 3],
+              }
+            : null;
+      }
+      if (isWeights) {
+        return [
+          for (var j = 0; j < valuesPerKey && base + j < floats.length; j++)
+            floats[base + j],
+        ];
+      }
+      if (isComponent) {
+        if (componentStride == 1) {
+          return floats.length > base ? floats[base] : null;
+        }
+        if (componentStride == 2) {
+          return floats.length >= base + 2
+              ? {'x': floats[base], 'y': floats[base + 1]}
+              : null;
+        }
+        if (componentStride == 3) {
+          return floats.length >= base + 3
+              ? {
+                  'x': floats[base],
+                  'y': floats[base + 1],
+                  'z': floats[base + 2],
+                }
+              : null;
+        }
+        if (componentStride == 4) {
+          return floats.length >= base + 4
               ? {
                   'x': floats[base],
                   'y': floats[base + 1],
                   'z': floats[base + 2],
                   'w': floats[base + 3],
                 }
-              : null,
-        AnimationProperty.weights => [
-          for (var j = 0; j < valuesPerKey && base + j < floats.length; j++)
+              : null;
+        }
+        return [
+          for (var j = 0; j < componentStride && base + j < floats.length; j++)
             floats[base + j],
-        ],
-        _ =>
-          floats.length >= base + 3
-              ? {
-                  'x': floats[base],
-                  'y': floats[base + 1],
-                  'z': floats[base + 2],
-                }
-              : null,
-      };
+        ];
+      }
+      return floats.length >= base + 3
+          ? {
+              'x': floats[base],
+              'y': floats[base + 1],
+              'z': floats[base + 2],
+            }
+          : null;
     }
 
     final inRange = <int>[
@@ -2373,6 +2443,9 @@ class EditorToolSurface {
     return {
       'target': _channelTarget(channel),
       'property': channel.property.name,
+      if (channel.componentType != null) 'componentType': channel.componentType,
+      if (channel.componentProperty != null)
+        'componentProperty': channel.componentProperty,
       'interpolation': channel.interpolation?.name ?? 'linear',
       'totalKeys': inRange.length,
       'keysTruncated': shown.length < inRange.length,

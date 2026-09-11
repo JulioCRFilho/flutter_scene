@@ -111,6 +111,11 @@ abstract class ComponentCodec {
     RealizeContext context,
   ) => false;
 
+  /// Whether [propertyName] supports live writes (e.g. via [writeLiveProperty]).
+  /// Returns false for structural or constructor-only properties (such as
+  /// `prewarm`).
+  bool isPropertyWritable(String propertyName) => true;
+
   /// Builds a live component from [spec], or returns null when it cannot be
   /// realized in the given context (for example a mesh with no resource
   /// realizer).

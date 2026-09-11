@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:vector_math/vector_math.dart' as vm;
@@ -43,8 +44,9 @@ enum BillboardFacing {
 /// {@category Geometry}
 class BillboardGeometry extends Geometry {
   /// Creates a billboard batch sized for up to [capacity] instances.
-  BillboardGeometry({this.capacity = 256})
+  BillboardGeometry({int capacity = 256})
     : assert(capacity > 0),
+      _capacity = capacity,
       _instanceData = Float32List(capacity * floatsPerInstance) {
     setVertexShader(baseShaderLibrary['BillboardVertex']!);
     final quad = _sharedQuad();
@@ -59,11 +61,24 @@ class BillboardGeometry extends Geometry {
   static const int _kQuadVertexCount = 4;
   static const int _kInstanceStrideBytes = floatsPerInstance * 4;
 
-  /// The maximum number of instances this batch can draw.
-  final int capacity;
+  int _capacity;
 
-  final Float32List _instanceData;
+  /// The maximum number of instances this batch can draw.
+  int get capacity => _capacity;
+
+  Float32List _instanceData;
   int _instanceCount = 0;
+
+  /// Ensures the batch can draw at least [minCapacity] instances, reallocating
+  /// the instance buffer if needed while preserving existing instance data.
+  void ensureCapacity(int minCapacity) {
+    if (minCapacity <= _capacity) return;
+    final newCapacity = math.max(minCapacity, _capacity * 2);
+    final next = Float32List(newCapacity * floatsPerInstance);
+    next.setRange(0, _instanceCount * floatsPerInstance, _instanceData);
+    _instanceData = next;
+    _capacity = newCapacity;
+  }
 
   /// How the quads orient toward the camera.
   BillboardFacing facing = BillboardFacing.spherical;

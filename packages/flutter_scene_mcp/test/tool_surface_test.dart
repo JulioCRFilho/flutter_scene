@@ -561,6 +561,75 @@ void main() {
       expect((summary['channels'] as List), hasLength(2));
     });
 
+    test('component property keyframes read back decoded', () async {
+      final surface = _surface();
+      await surface.dispatch('run_command', {
+        'command': 'createNode',
+        'params': {'name': 'Emitter'},
+      });
+      final nodeId = await _firstRootId(surface);
+      await surface.dispatch('run_command', {
+        'command': 'addComponent',
+        'params': {'nodeId': nodeId, 'componentType': 'particleEmitter'},
+      });
+      await surface.dispatch('run_command', {'command': 'createAnimation'});
+      final animationId =
+          (((await surface.dispatch('list_animations', {}))['animations']
+                          as List)
+                      .single
+                  as Map)['id']
+              as String;
+      await surface.dispatch('run_command', {
+        'command': 'setAnimationKeyframe',
+        'params': {
+          'animationId': animationId,
+          'nodeId': nodeId,
+          'property': 'componentProperty',
+          'componentType': 'particleEmitter',
+          'componentProperty': 'maxParticles',
+          'time': 0.0,
+          'value': [10.0],
+        },
+      });
+      await surface.dispatch('run_command', {
+        'command': 'setAnimationKeyframe',
+        'params': {
+          'animationId': animationId,
+          'nodeId': nodeId,
+          'property': 'componentProperty',
+          'componentType': 'particleEmitter',
+          'componentProperty': 'maxParticles',
+          'time': 2.0,
+          'value': [100.0],
+        },
+      });
+
+      final detail = await surface.dispatch('get_animation', {
+        'ref': animationId,
+      });
+      final channel = (detail['channels'] as List).single as Map;
+      expect(channel['property'], 'componentProperty');
+      expect(channel['componentType'], 'particleEmitter');
+      expect(channel['componentProperty'], 'maxParticles');
+      final keyframes = channel['keyframes'] as List;
+      expect(keyframes, hasLength(2));
+      expect((keyframes[0] as Map)['time'], 0.0);
+      expect((keyframes[0] as Map)['value'], 10.0);
+      expect((keyframes[1] as Map)['time'], 2.0);
+      expect((keyframes[1] as Map)['value'], 100.0);
+
+      // list_animations summary includes componentType and componentProperty
+      final summary =
+          ((await surface.dispatch('list_animations', {}))['animations']
+                      as List)
+                  .single
+              as Map;
+      final summaryChannel = (summary['channels'] as List).single as Map;
+      expect(summaryChannel['property'], 'componentProperty');
+      expect(summaryChannel['componentType'], 'particleEmitter');
+      expect(summaryChannel['componentProperty'], 'maxParticles');
+    });
+
     test('get_animation on a missing ref throws ToolError', () {
       expect(
         () => _surface().dispatch('get_animation', {'ref': 'Nope'}),

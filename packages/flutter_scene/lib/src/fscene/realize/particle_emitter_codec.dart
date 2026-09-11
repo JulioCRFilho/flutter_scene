@@ -287,7 +287,7 @@ ParticleSystem particleSystemFromProperties(
 Map<String, PropertyValue> particleSystemToProperties(ParticleSystem system) {
   final bursts = system.spawner.bursts;
   return {
-    'maxParticles': IntValue(system.storage.capacity),
+    'maxParticles': IntValue(system.maxParticles),
     'emitRate': DoubleValue(system.spawner.rate),
     if (bursts.isNotEmpty)
       'bursts': ListValue([
@@ -628,11 +628,10 @@ ComponentField<C> _distributionField<C extends Component>(
 /// for serialization, realize flows them through
 /// [particleSystemFromProperties] in the codec's `create`, and the animated
 /// knobs carry live writes so an animation (editor preview or runtime clip)
-/// retunes the running system in place. Structural and constructor-baked
-/// fields stay write-free: [maxParticles] sizes the storage allocated at
-/// realize (animating it would reallocate mid-play), [prewarm] is a
+/// retunes the running system in place. Construction-baked
+/// fields stay write-free: [prewarm] is a
 /// construction-time bake, the burst list/shape/module stack serialize as
-/// blobs, and the distributions are structured kinds the float channels
+/// blobs, and non-constant distributions are structured kinds the float channels
 /// never carry.
 List<ComponentField<C>> particleSystemFields<C extends Component>(
   ParticleSystem Function(C component) systemOf,
@@ -642,7 +641,8 @@ List<ComponentField<C>> particleSystemFields<C extends Component>(
     defaultValue: _kMaxParticles,
     doc: 'Hard cap on simultaneous particles.',
     constraints: const [IntRange(1, null)],
-    get: (c) => systemOf(c).storage.capacity,
+    get: (c) => systemOf(c).maxParticles,
+    set: (c, v) => systemOf(c).maxParticles = v,
   ),
   ComponentField.number(
     'emitRate',

@@ -15,11 +15,11 @@ bool _gpuAvailable() {
 }
 
 /// Covers the particle emitter codec's live write bindings: the animated
-/// particle-system knobs (`emitRate`, `gravity`, `looping`, `duration`,
-/// `fixedStep`, `maxFrameTime`, `seed`) must apply onto an already-constructed
-/// component through `writeLiveProperty` — the path both the editor's
-/// animation preview and the engine's runtime component-property channels
-/// use. Structural knobs (`maxParticles`) intentionally have no live write.
+/// particle-system knobs (`maxParticles`, `emitRate`, `gravity`, `looping`,
+/// `duration`, `fixedStep`, `maxFrameTime`, `seed`) must apply onto an
+/// already-constructed component through `writeLiveProperty` — the path both
+/// the editor's animation preview and the engine's runtime component-property
+/// channels use.
 void main() {
   if (!_gpuAvailable()) {
     test(
@@ -175,19 +175,17 @@ void main() {
     expect(liveValue(component, 'seed'), const IntValue(42));
   });
 
-  test('maxParticles has no live write (structural knob)', () {
+  test('maxParticles writes through to live system cap', () {
     final component = emitter({});
     expect(
       codec.writeLiveProperty(
         component,
         'maxParticles',
-        const IntValue(4096),
+        const IntValue(100),
         RealizeContext(SceneDocument()),
       ),
-      isFalse,
-      reason:
-          'animating the storage capacity would reallocate mid-play; it is '
-          'constructor-only by design',
+      isTrue,
     );
+    expect(liveValue(component, 'maxParticles'), const IntValue(100));
   });
 }

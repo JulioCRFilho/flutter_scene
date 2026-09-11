@@ -19,8 +19,9 @@ import 'dart:typed_data';
 /// {@category Particles}
 class ParticleStorage {
   /// Allocates storage for up to [capacity] simultaneous particles.
-  ParticleStorage(this.capacity)
+  ParticleStorage(int capacity)
     : assert(capacity > 0),
+      _capacity = capacity,
       posX = Float32List(capacity),
       posY = Float32List(capacity),
       posZ = Float32List(capacity),
@@ -43,44 +44,106 @@ class ParticleStorage {
       axisZ = Float32List(capacity),
       random01 = Float32List(capacity);
 
+  int _capacity;
+
   /// The maximum number of simultaneous particles.
-  final int capacity;
+  int get capacity => _capacity;
 
   /// World-space position (in the emitter node's local space).
-  final Float32List posX, posY, posZ;
+  Float32List posX, posY, posZ;
 
   /// Linear velocity, world units per second.
-  final Float32List velX, velY, velZ;
+  Float32List velX, velY, velZ;
 
   /// Seconds since the particle was spawned.
-  final Float32List age;
+  Float32List age;
 
   /// Total lifetime in seconds; the particle dies once [age] exceeds it.
-  final Float32List lifetime;
+  Float32List lifetime;
 
   /// In-plane rotation (radians) and its rate of change (radians/second).
-  final Float32List rotation, angularVelocity;
+  Float32List rotation, angularVelocity;
 
   /// Current rendered size (world units) and the size set at spawn, which
   /// size-over-life scales.
-  final Float32List size, baseSize;
+  Float32List size, baseSize;
 
   /// Current linear RGBA color (premultiplication happens in the shader).
-  final Float32List colorR, colorG, colorB, colorA;
+  Float32List colorR, colorG, colorB, colorA;
 
   /// Flipbook frame index (fractional values round to the nearest cell). Left
   /// at zero unless a module (or spawn code) writes it.
-  final Float32List frame;
+  Float32List frame;
 
   /// Unit 3D rotation axis, set to a uniformly random direction at spawn.
   /// Billboards ignore it (their [rotation] is in-plane); mesh particles
   /// tumble around it by [rotation].
-  final Float32List axisX, axisY, axisZ;
+  Float32List axisX, axisY, axisZ;
 
   /// Per-particle random in `[0, 1)`, written at spawn. Distributions sample
   /// against it (directly, or via [randomFor] for an independent stream) so a
   /// particle's randomized properties are stable for its whole life.
-  final Float32List random01;
+  Float32List random01;
+
+  /// Ensures the storage can hold at least [minCapacity] particles, reallocating
+  /// column buffers if needed while preserving live particles `[0, aliveCount)`.
+  void ensureCapacity(int minCapacity) {
+    if (minCapacity <= _capacity) return;
+    final newCapacity = math.max(minCapacity, _capacity * 2);
+    final newPosX = Float32List(newCapacity)..setRange(0, _aliveCount, posX);
+    final newPosY = Float32List(newCapacity)..setRange(0, _aliveCount, posY);
+    final newPosZ = Float32List(newCapacity)..setRange(0, _aliveCount, posZ);
+    final newVelX = Float32List(newCapacity)..setRange(0, _aliveCount, velX);
+    final newVelY = Float32List(newCapacity)..setRange(0, _aliveCount, velY);
+    final newVelZ = Float32List(newCapacity)..setRange(0, _aliveCount, velZ);
+    final newAge = Float32List(newCapacity)..setRange(0, _aliveCount, age);
+    final newLifetime =
+        Float32List(newCapacity)..setRange(0, _aliveCount, lifetime);
+    final newRotation =
+        Float32List(newCapacity)..setRange(0, _aliveCount, rotation);
+    final newAngularVelocity =
+        Float32List(newCapacity)..setRange(0, _aliveCount, angularVelocity);
+    final newSize = Float32List(newCapacity)..setRange(0, _aliveCount, size);
+    final newBaseSize =
+        Float32List(newCapacity)..setRange(0, _aliveCount, baseSize);
+    final newColorR =
+        Float32List(newCapacity)..setRange(0, _aliveCount, colorR);
+    final newColorG =
+        Float32List(newCapacity)..setRange(0, _aliveCount, colorG);
+    final newColorB =
+        Float32List(newCapacity)..setRange(0, _aliveCount, colorB);
+    final newColorA =
+        Float32List(newCapacity)..setRange(0, _aliveCount, colorA);
+    final newFrame = Float32List(newCapacity)..setRange(0, _aliveCount, frame);
+    final newAxisX = Float32List(newCapacity)..setRange(0, _aliveCount, axisX);
+    final newAxisY = Float32List(newCapacity)..setRange(0, _aliveCount, axisY);
+    final newAxisZ = Float32List(newCapacity)..setRange(0, _aliveCount, axisZ);
+    final newRandom01 =
+        Float32List(newCapacity)..setRange(0, _aliveCount, random01);
+
+    _capacity = newCapacity;
+    posX = newPosX;
+    posY = newPosY;
+    posZ = newPosZ;
+    velX = newVelX;
+    velY = newVelY;
+    velZ = newVelZ;
+    age = newAge;
+    lifetime = newLifetime;
+    rotation = newRotation;
+    angularVelocity = newAngularVelocity;
+    size = newSize;
+    baseSize = newBaseSize;
+    colorR = newColorR;
+    colorG = newColorG;
+    colorB = newColorB;
+    colorA = newColorA;
+    frame = newFrame;
+    axisX = newAxisX;
+    axisY = newAxisY;
+    axisZ = newAxisZ;
+    random01 = newRandom01;
+  }
 
   int _aliveCount = 0;
 

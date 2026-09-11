@@ -69,6 +69,7 @@ class ParticleSystem {
        assert(maxFrameTime >= fixedStep),
        assert(prewarm >= 0),
        storage = ParticleStorage(maxParticles),
+       _maxParticles = maxParticles,
        modules = List<ParticleModule>.unmodifiable(modules),
        startColor = startColor ?? ConstantColor(Vector4(1, 1, 1, 1)),
        gravity = gravity?.clone() ?? Vector3.zero(),
@@ -132,6 +133,20 @@ class ParticleSystem {
   /// keyframe can re-roll the spawn stream (applied on the next [reset]).
   int seed;
 
+  int _maxParticles;
+
+  /// The active upper limit on simultaneously live particles. Mutable so an
+  /// animated `maxParticles` keyframe can throttle or cap emission, dynamically
+  /// growing storage if the requested cap exceeds current capacity.
+  int get maxParticles => _maxParticles;
+  set maxParticles(int value) {
+    final clamped = math.max(0, value);
+    if (clamped > storage.capacity) {
+      storage.ensureCapacity(clamped);
+    }
+    _maxParticles = clamped;
+  }
+
   math.Random _random;
   double _accumulator = 0.0;
   double _systemTime = 0.0;
@@ -170,6 +185,7 @@ class ParticleSystem {
     if (looping || _systemTime < duration) {
       final toSpawn = spawner.emit(dt, _systemTime);
       for (var i = 0; i < toSpawn; i++) {
+        if (storage.aliveCount >= _maxParticles) break;
         final index = storage.spawn();
         if (index < 0) break; // pool full
         _initParticle(index);

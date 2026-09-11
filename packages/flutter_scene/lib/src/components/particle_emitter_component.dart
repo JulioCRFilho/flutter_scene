@@ -96,6 +96,9 @@ class ParticleEmitterComponent extends MeshComponent {
   void _repack() {
     final s = system.storage;
     final count = s.aliveCount;
+    if (count > _geometry.capacity) {
+      _geometry.ensureCapacity(count);
+    }
     for (var i = 0; i < count; i++) {
       final size = s.size[i];
       var width = size * aspectRatio;

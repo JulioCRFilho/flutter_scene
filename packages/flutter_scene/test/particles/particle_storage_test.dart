@@ -91,6 +91,32 @@ void main() {
       expect(s.axisY[0], 1);
       expect(s.random01[0], 0.25);
     });
+
+    test('ensureCapacity expands capacity and preserves live particles', () {
+      final s = ParticleStorage(2);
+      expect(s.spawn(), 0);
+      expect(s.spawn(), 1);
+      expect(s.isFull, isTrue);
+      s.posX[0] = 10.0;
+      s.posX[1] = 20.0;
+      s.colorR[0] = 0.8;
+      s.colorR[1] = 0.4;
+
+      s.ensureCapacity(5);
+      expect(s.capacity, greaterThanOrEqualTo(5));
+      expect(s.aliveCount, 2);
+      expect(s.isFull, isFalse);
+      expect(s.posX[0], 10.0);
+      expect(s.posX[1], 20.0);
+      expect(s.colorR[0], closeTo(0.8, 1e-5));
+      expect(s.colorR[1], closeTo(0.4, 1e-5));
+
+      // Can spawn more particles now
+      expect(s.spawn(), 2);
+      expect(s.spawn(), 3);
+      expect(s.spawn(), 4);
+      expect(s.aliveCount, 5);
+    });
   });
 
   group('ParticleStorage.randomFor', () {

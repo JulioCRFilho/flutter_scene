@@ -248,5 +248,54 @@ void main() {
       }
       expect(_snapshot(a.storage), isNot(equals(_snapshot(b.storage))));
     });
+
+    test('maxParticles dynamically throttles particle emission', () {
+      final system = ParticleSystem(
+        maxParticles: 100,
+        shape: PointEmitterShape(),
+        spawner: Spawner(rate: 1000.0),
+        fixedStep: _fixed,
+      );
+      system.step(_fixed);
+      expect(system.storage.aliveCount, 16); // 1000 * (1/60) = 16.67 -> 16 on first step
+
+      // Setting maxParticles caps spawning
+      system.maxParticles = 10;
+      system.reset();
+      system.step(_fixed);
+      expect(system.storage.aliveCount, 10);
+
+      // Setting maxParticles to 0 stops spawning completely
+      system.maxParticles = 0;
+      system.reset();
+      system.step(_fixed);
+      expect(system.storage.aliveCount, 0);
+    });
+
+    test('maxParticles dynamically grows storage when increased beyond initial capacity', () {
+      final system = ParticleSystem(
+        maxParticles: 1,
+        shape: PointEmitterShape(),
+        spawner: Spawner(rate: 1000.0),
+        fixedStep: _fixed,
+      );
+      expect(system.storage.capacity, 1);
+      system.step(_fixed);
+      expect(system.storage.aliveCount, 1);
+
+      // Increase maxParticles to 50
+      system.maxParticles = 50;
+      expect(system.maxParticles, 50);
+      expect(system.storage.capacity, greaterThanOrEqualTo(50));
+      // Previous alive particle is kept
+      expect(system.storage.aliveCount, 1);
+
+      // Subsequent steps can now spawn up to 50 particles
+      for (var i = 0; i < 5; i++) {
+        system.step(_fixed);
+      }
+      expect(system.storage.aliveCount, greaterThan(1));
+      expect(system.storage.aliveCount, lessThanOrEqualTo(50));
+    });
   });
 }

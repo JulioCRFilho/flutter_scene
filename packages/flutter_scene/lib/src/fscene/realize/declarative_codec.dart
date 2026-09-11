@@ -506,6 +506,17 @@ abstract class DeclarativeComponentCodec<C extends Component>
   }
 
   @override
+  bool isPropertyWritable(String propertyName) {
+    for (final field in resolvedFields) {
+      if (field.def.name == propertyName ||
+          field.def.formerNames.contains(propertyName)) {
+        return field.write != null;
+      }
+    }
+    return false;
+  }
+
+  @override
   Component? realize(ComponentSpec spec, RealizeContext context) {
     final props = PropertyReader(spec, this, context);
     final component = create(props);

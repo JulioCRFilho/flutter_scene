@@ -531,15 +531,20 @@ class EditorController extends ChangeNotifier
   List<ComponentPropertyDef> componentSchema(String type) =>
       _componentRegistry.codecFor(type)?.propertySchema ?? const [];
 
-  /// The declared, float-encodable component properties of [type] — the
-  /// subset the animation panel can author as `componentProperty` channels
+  /// The declared, float-encodable, writable component properties of [type] —
+  /// the subset the animation panel can author as `componentProperty` channels
   /// (one float row per keyframe). Properties without a declared float stride
-  /// stay out: their values serialize as keyframe blobs, which the panel's
-  /// float-value keying does not author.
-  List<ComponentPropertyDef> animatableComponentProperties(String type) => [
-    for (final def in componentSchema(type))
-      if (def.effectiveFloatStride != null) def,
-  ];
+  /// or without a live write binding stay out: their values cannot be keyed
+  /// and applied to the live component during playback.
+  List<ComponentPropertyDef> animatableComponentProperties(String type) {
+    final codec = _componentRegistry.codecFor(type);
+    return [
+      for (final def in componentSchema(type))
+        if (def.effectiveFloatStride != null &&
+            (codec == null || codec.isPropertyWritable(def.name)))
+          def,
+    ];
+  }
 
   /// The full portable schema of component [type], or null when unknown.
   ComponentSchema? componentSchemaFor(String type) =>
@@ -1167,6 +1172,7 @@ class EditorController extends ChangeNotifier
               keyframesBlobPayload: channel.keyframesBlob == null
                   ? null
                   : document.payload(channel.keyframesBlob!)?.bytes,
+              floatStride: def.effectiveFloatStride,
             )
             as engine.ComponentPropertyResolver;
     _captureComponentPropertyIfNeeded(

@@ -13,7 +13,7 @@ void main() {
     final root = host.createNode(name: 'HostRoot', root: true);
 
     final source = SceneDocument();
-    final imported = source.createNode(name: 'ImportedThing', root: true);
+    source.createNode(name: 'ImportedThing', root: true);
 
     // A member id (or any stale id) is absent from the host document — the
     // same situation a member-selected import used to cause. The graft must
