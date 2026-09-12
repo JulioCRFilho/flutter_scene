@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../controller/editor_controller.dart';
+import 'floating_property_panel.dart';
 
 /// Scene-tree outliner panel.
 ///
@@ -50,6 +51,7 @@ class _OutlinerPanelState extends State<OutlinerPanel> {
   void dispose() {
     controller.outlinerReveal.removeListener(_onRevealRequest);
     _scroll.dispose();
+    hideFloatingPropertyPanel();
     super.dispose();
   }
 
@@ -102,6 +104,7 @@ class _OutlinerPanelState extends State<OutlinerPanel> {
     if (oldWidget.controller != widget.controller) {
       _collapsed.clear();
       _collapsedComponents.clear();
+      hideFloatingPropertyPanel();
     }
   }
 
@@ -759,40 +762,55 @@ class _OutlinerComponent extends StatelessWidget {
         controller.activeComponentNodeId == nodeId &&
         controller.activeComponentType == type;
     final rowColor = active ? scheme.primary.withValues(alpha: 0.12) : null;
-    return Container(
-      height: _kRowExtent,
-      padding: EdgeInsets.only(left: 4.0 + depth * 16.0, right: 4),
-      color: rowColor,
-      child: Row(
-        children: [
-          SizedBox(
-            width: 16,
-            child: hasProperties
-                ? GestureDetector(
-                    onTap: () => onExpandedChanged(!expanded),
-                    child: Icon(
-                      expanded ? Icons.arrow_drop_down : Icons.arrow_right,
-                      size: 16,
-                    ),
-                  )
-                : null,
-          ),
-          const SizedBox(width: 2),
-          Icon(Icons.widgets_outlined, size: 12, color: scheme.primary),
-          const SizedBox(width: 4),
-          Expanded(
-            child: Text(
-              type,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 12,
-                fontStyle: FontStyle.italic,
-                color: active ? scheme.primary : null,
+    return InkWell(
+      onDoubleTap: () {
+        final box = context.findRenderObject() as RenderBox?;
+        final rect = box != null
+            ? (box.localToGlobal(Offset.zero) & box.size)
+            : null;
+        showFloatingPropertyPanel(
+          context,
+          controller: controller,
+          nodeId: nodeId,
+          componentType: type,
+          anchorRect: rect,
+        );
+      },
+      child: Container(
+        height: _kRowExtent,
+        padding: EdgeInsets.only(left: 4.0 + depth * 16.0, right: 4),
+        color: rowColor,
+        child: Row(
+          children: [
+            SizedBox(
+              width: 16,
+              child: hasProperties
+                  ? GestureDetector(
+                      onTap: () => onExpandedChanged(!expanded),
+                      child: Icon(
+                        expanded ? Icons.arrow_drop_down : Icons.arrow_right,
+                        size: 16,
+                      ),
+                    )
+                  : null,
+            ),
+            const SizedBox(width: 2),
+            Icon(Icons.widgets_outlined, size: 12, color: scheme.primary),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Text(
+                type,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontStyle: FontStyle.italic,
+                  color: active ? scheme.primary : null,
+                ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -830,6 +848,20 @@ class _OutlinerProperty extends StatelessWidget {
     final rowColor = active ? scheme.primary.withValues(alpha: 0.12) : null;
     return InkWell(
       onTap: () => controller.selectComponentProperty(nodeId, type, property),
+      onDoubleTap: () {
+        final box = context.findRenderObject() as RenderBox?;
+        final rect = box != null
+            ? (box.localToGlobal(Offset.zero) & box.size)
+            : null;
+        showFloatingPropertyPanel(
+          context,
+          controller: controller,
+          nodeId: nodeId,
+          componentType: type,
+          propertyName: property,
+          anchorRect: rect,
+        );
+      },
       child: Container(
         height: _kRowExtent,
         padding: EdgeInsets.only(left: 4.0 + depth * 16.0, right: 4),

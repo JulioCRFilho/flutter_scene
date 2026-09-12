@@ -311,6 +311,9 @@ mixin _NodeLifecycle<T extends _SceneNodeWidgetBase> on State<T> {
     }
     for (final component in declared) {
       if (!_appliedComponents.any((c) => identical(c, component))) {
+        if (component.isAttached && component.node != _node) {
+          component.node.removeComponent(component);
+        }
         _node.addComponent(component);
       }
     }
@@ -351,6 +354,11 @@ mixin _NodeLifecycle<T extends _SceneNodeWidgetBase> on State<T> {
     // Leave the scene while off the element tree; build re-attaches on
     // reinsertion (GlobalKey moves), dispose follows otherwise.
     _detach();
+    for (final component in _appliedComponents) {
+      _node.removeComponent(component);
+    }
+    _appliedComponents = const [];
+    _declaredComponents = const [];
     super.deactivate();
   }
 
@@ -372,6 +380,7 @@ mixin _NodeLifecycle<T extends _SceneNodeWidgetBase> on State<T> {
 
   Widget buildHost(BuildContext context) {
     _syncParent(context);
+    _syncComponents();
     return _SceneParentScope(
       parent: _node,
       child: _NodeChildHost(children: _children),
