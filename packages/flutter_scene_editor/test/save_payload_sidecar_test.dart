@@ -56,16 +56,53 @@ void main() {
 
     // The sidecar exists and the TEXT references it — both from a single
     // save, without needing a second pass.
-    expect(File('$path.b').existsSync(), isTrue,
+    final expectedSidecar =
+        '${dir.path}${Platform.pathSeparator}scene.payloads.fsceneb';
+    expect(File(expectedSidecar).existsSync(), isTrue,
         reason: 'sidecar should be written next to the scene');
     final text = File(path).readAsStringSync();
     expect(text, contains('payloadSource'),
         reason: 'a save with persistable payloads must reference them');
     final restored = readFscene(text);
-    expect(restored.payloadSource, isNotNull);
+    expect(restored.payloadSource, equals('scene.payloads.fsceneb'));
     expect(File('${dir.path}${Platform.pathSeparator}'
             '${restored.payloadSource}').existsSync(),
         isTrue,
         reason: 'payloadSource must resolve beside the .fscene');
+  });
+
+  test('saveFscene writes sidecar on first save when payloadsDirty is false',
+      () async {
+    await Scene.initializeStaticResources();
+    final document = SceneDocument();
+    final payloadId = document.newId();
+    document.addPayload(
+      PayloadSpec(
+        payloadId,
+        encoding: PayloadEncoding.matrices,
+        bytes: Float32List.fromList(
+          List.filled(16, 0)..[0] = 1..[5] = 1..[10] = 1..[15] = 1,
+        ).buffer.asUint8List(),
+      ),
+    );
+    // Mimics opening an imported scene (payloadsDirty starts false).
+    final controller = await EditorController.open(EditorSession(document));
+    addTearDown(controller.dispose);
+    expect(controller.payloadsDirty, isFalse);
+
+    final dir = await Directory.systemTemp.createTemp('fscene_import_save_test');
+    addTearDown(() => dir.delete(recursive: true));
+    final path = '${dir.path}${Platform.pathSeparator}imported_model.fscene';
+
+    await saveFscene(controller, path);
+
+    final expectedSidecar =
+        '${dir.path}${Platform.pathSeparator}imported_model.payloads.fsceneb';
+    expect(File(expectedSidecar).existsSync(), isTrue,
+        reason: 'sidecar should be created on first save of imported scene');
+    final text = File(path).readAsStringSync();
+    expect(text, contains('payloadSource'));
+    final restored = readFscene(text);
+    expect(restored.payloadSource, equals('imported_model.payloads.fsceneb'));
   });
 }

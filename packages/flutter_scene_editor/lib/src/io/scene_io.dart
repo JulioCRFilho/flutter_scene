@@ -6,6 +6,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:file_selector/file_selector.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:scene/scene.dart';
 // ignore: implementation_imports
 import 'package:flutter_scene/src/importer/in_memory_import.dart';
@@ -355,28 +356,36 @@ Future<void> saveFscene(EditorController controller, String path) async {
   if (editorState != null) controller.document.editor = editorState;
 
   // Payload bytes live in the sidecar, not the lean text, so a scene that
-  // touched the payload pool (a mesh split, an embedded import) must rewrite
-  // it or those bytes are lost on reopen. Name the sidecar before writing the
-  // text so the manifest references it.
+  // touched the payload pool (a mesh split, an embedded import), or one saved
+  // for the first time after import, or one whose expected sidecar is missing
+  // or differently named (Save As), must write it so those bytes are not lost
+  // on reopen. Name the sidecar before writing the text so the manifest
+  // references it.
   final document = controller.document;
-  final rewriteSidecar =
-      controller.payloadsDirty && document.payloads.isNotEmpty;
+  final stem = File(path).uri.pathSegments.last.replaceAll('.fscene', '');
+  final expected = '$stem.payloads.fsceneb';
+  final sidecarPath =
+      File(path).parent.uri.resolveUri(Uri.file(expected)).toFilePath();
+  final sidecarMissing = !File(sidecarPath).existsSync();
+
+  final hasPayloadBytes = document.payloads.values.any(
+    (payload) => payload.bytes != null && payload.bytes!.isNotEmpty,
+  );
+
+  final rewriteSidecar = hasPayloadBytes &&
+      (controller.payloadsDirty ||
+          document.payloadSource == null ||
+          document.payloadSource != expected ||
+          sidecarMissing);
+
   if (rewriteSidecar) {
     // Name the sidecar after the file being written, not after whatever the
     // opened document carried. A Save As that kept the source name would
     // write this document's payload pool over the original's sidecar, and
     // leave the original reading bytes it did not produce.
-    final stem = File(path).uri.pathSegments.last.replaceAll('.fscene', '');
-    final expected = '$stem.payloads.fsceneb';
     if (document.payloadSource != expected) {
       document.payloadSource = expected;
     }
-  }
-
-  // Write the sidecar before serializing the text so the new payloadSource is
-  // present in the saved document and a first save doesn't produce an orphaned
-  // sidecar that no consumer can discover.
-  if (rewriteSidecar) {
     _writePayloadSidecar(document, path);
   }
 
@@ -406,10 +415,12 @@ void _writePayloadSidecar(SceneDocument document, String path) {
     document.payloadSource ??= Uri.file(
       File(sidecarPath).uri.pathSegments.last,
     ).path;
-  } on FileSystemException {
+  } on FileSystemException catch (e) {
     // The scene text still saves; the payloads just do not persist.
-  } on FscenebFormatException {
+    debugPrint('flutter_scene_editor: failed to write payload sidecar: $e');
+  } on FscenebFormatException catch (e) {
     // A manifest-only payload cannot be embedded; leave the old sidecar.
+    debugPrint('flutter_scene_editor: failed to encode payload sidecar: $e');
   }
 }
 
