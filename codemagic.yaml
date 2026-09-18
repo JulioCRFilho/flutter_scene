@@ -29,8 +29,19 @@ definitions:
       name: Select the Flutter channel
       # A release check renders against stable; everything else stays on the
       # master the image ships, so this is a no-op on the usual path.
+      # FLUTTER_REVISION pins the SDK to one framework commit instead, for
+      # bisecting a master regression against this matrix.
       script: |
         set -eu
+        revision="${FLUTTER_REVISION:-}"
+        if [ -n "$revision" ]; then
+          root=$(dirname "$(dirname "$(command -v flutter)")")
+          echo "Pinning Flutter at $revision in $root."
+          git -C "$root" fetch --depth 1 origin "$revision"
+          git -C "$root" checkout -q "$revision"
+          flutter --version
+          exit 0
+        fi
         channel="${FLUTTER_CHANNEL:-master}"
         if [ "$channel" = "master" ]; then
           echo "Staying on the image's master Flutter."
@@ -47,6 +58,9 @@ definitions:
       script: |
         mkdir -p "$CM_BUILD_DIR/examples/smoke_render/build"
         flutter --version | tee "$CM_BUILD_DIR/examples/smoke_render/build/flutter-version.txt"
+        # The doctor block rides along so an upstream report about this
+        # machine can quote it.
+        flutter doctor -v >> "$CM_BUILD_DIR/examples/smoke_render/build/flutter-version.txt" 2>&1 || true
 
     - &script_assert_no_credentials
       name: Assert the build holds no credentials
@@ -97,6 +111,13 @@ workflows:
           flutter config --enable-macos-desktop --enable-native-assets
           --enable-dart-data-assets
       - *script_pub_get
+      - name: GPU memory accounting
+        script: |
+          cd "$CM_BUILD_DIR/examples/smoke_render"
+          flutter drive \
+            --driver=test_driver/integration_test.dart \
+            --target=integration_test/memory_pressure_test.dart \
+            -d macos --enable-impeller --enable-flutter-gpu
       - name: Render smoke scenes
         script: |
           cd "$CM_BUILD_DIR/examples/smoke_render"
@@ -118,10 +139,17 @@ workflows:
     max_build_duration: 45
     environment:
       <<: *smoke_environment
-      xcode: latest
+      # Pinned to the image this lane was stable on. Codemagic moved `latest`
+      # to 26.6 (Xcode 26.6 on macOS 26.5.1) on 2026-09-06, and from then on
+      # the iOS 26 simulator froze during boot or never launched the app in
+      # roughly one build in three. Retry `latest` after the next image roll.
+      xcode: 26.5
       vars:
         FLUTTER_DART_DATA_ASSETS: "true"
         SMOKE_SIM_DEVICE: iPhone 17 Pro
+        # The Dart VM service port the render step launches the app on, so
+        # the drive can attach to it directly (see that step).
+        SMOKE_VM_SERVICE_PORT: "54321"
     cache: *smoke_cache
     scripts:
       - *script_select_channel
@@ -142,6 +170,11 @@ workflows:
         script: flutter config --enable-native-assets --enable-dart-data-assets
       - *script_pub_get
       - name: Boot the simulator
+        # iOS 26 simulators freeze during boot now and then on macOS virtual
+        # machines (Apple has the report), and `bootstatus -b` then waits
+        # forever, which is how this lane ran to its 45 minute cap with no
+        # artifacts. Every wait here is bounded: a boot that has not finished
+        # in two minutes is shut down and tried again, twice.
         script: |
           udid=$(xcrun simctl list devices available \
             | sed -n "s/.*${SMOKE_SIM_DEVICE} (\([0-9A-F-]\{36\}\)).*/\1/p" \
@@ -152,21 +185,131 @@ workflows:
               | sed -n 's/.*iPhone.* (\([0-9A-F-]\{36\}\)).*/\1/p' | head -1)
           fi
           test -n "$udid"
-          xcrun simctl boot "$udid" || true
-          xcrun simctl bootstatus "$udid" -b
+          xcrun simctl list runtimes | grep -i ios || true
+
+          # Runs a command with a deadline in seconds; 124 when it ran out.
+          bounded() {
+            local limit=$1; shift
+            "$@" & local pid=$!
+            local waited=0
+            while kill -0 "$pid" 2>/dev/null; do
+              if [ "$waited" -ge "$limit" ]; then
+                kill "$pid" 2>/dev/null || true
+                wait "$pid" 2>/dev/null || true
+                return 124
+              fi
+              sleep 1; waited=$((waited + 1))
+            done
+            wait "$pid"
+          }
+
+          booted=0
+          for attempt in 1 2 3; do
+            echo "Boot attempt $attempt"
+            bounded 60 xcrun simctl boot "$udid" || true
+            if bounded 120 xcrun simctl bootstatus "$udid" -b; then
+              booted=1
+              break
+            fi
+            echo "The simulator did not finish booting in time; resetting it."
+            bounded 60 xcrun simctl shutdown "$udid" || true
+            # A device that froze mid-boot is not reused as is; erasing it
+            # returns it to a clean state before the next attempt.
+            bounded 60 xcrun simctl erase "$udid" || true
+            sleep 5
+          done
+          if [ "$booted" -ne 1 ]; then
+            echo "The simulator never booted after 3 attempts."
+            xcrun simctl list devices | grep -i "$udid" || true
+            exit 1
+          fi
           echo "$udid" > "$CM_BUILD_DIR/smoke-sim-udid"
       - name: Render smoke scenes
+        # `flutter drive` would launch the app and discover its Dart VM service
+        # by reading the simulator's unified log (`simctl spawn ... log
+        # stream`), and on this iOS 26 runtime that stream never delivers the
+        # line, on any Flutter channel, while the app itself is up with the
+        # service listening (the same log is readable afterwards with `log
+        # show`). So the app is built, installed, and launched here on a fixed
+        # VM service port, the port is polled, and the drive attaches to the
+        # running app with --use-existing-app, which never touches the log.
+        # Every wait is bounded, and the drive's output ships as an artifact.
         script: |
           cd "$CM_BUILD_DIR/examples/smoke_render"
-          flutter drive \
+          udid=$(cat "$CM_BUILD_DIR/smoke-sim-udid")
+          port="${SMOKE_VM_SERVICE_PORT:-54321}"
+          bundle_id=dev.bdero.smokeRender
+          log="$CM_BUILD_DIR/examples/smoke_render/build/smoke-drive.log"
+          started=$(date '+%Y-%m-%d %H:%M:%S')
+          finish() { echo "$1" > "$CM_BUILD_DIR/smoke-status"; exit 0; }
+
+          # Each command's own status decides, not the tee's, since the shell
+          # here is not guaranteed to have pipefail.
+          run() { "$@" > step.out 2>&1; st=$?; cat step.out; cat step.out >> "$log"; return $st; }
+
+          echo "== build ==" | tee "$log"
+          run flutter build ios --simulator --debug \
+            --target=integration_test/smoke_test.dart || finish 2
+          app=build/ios/iphonesimulator/Runner.app
+          test -d "$app" || finish 2
+
+          echo "== install and launch ==" | tee -a "$log"
+          run xcrun simctl install "$udid" "$app" || finish 3
+          # The same flags the tool would pass for a debug drive, plus the
+          # fixed port and no auth code so the URL is known in advance.
+          run xcrun simctl launch "$udid" "$bundle_id" \
+            --enable-dart-profiling --disable-vm-service-publication \
+            --enable-checked-mode --verify-entry-points \
+            --vm-service-port="$port" --disable-service-auth-codes \
+            --enable-impeller=true --enable-flutter-gpu || finish 3
+
+          up=0
+          for _ in $(seq 1 120); do
+            if curl -sf "http://127.0.0.1:$port/" -o /dev/null; then up=1; break; fi
+            sleep 1
+          done
+          if [ "$up" -ne 1 ]; then
+            echo "The app never opened its VM service on port $port." | tee -a "$log"
+            xcrun simctl spawn "$udid" log show --start "$started" --style compact \
+              --predicate 'process == "Runner"' 2>/dev/null \
+              | grep -v RunningBoard | tail -n 150 >> "$log" || true
+            for report in $(ls -t "$HOME/Library/Logs/DiagnosticReports"/Runner* 2>/dev/null | head -2); do
+              echo "--- $report ---" >> "$log"
+              head -n 60 "$report" >> "$log"
+            done
+            finish 4
+          fi
+          echo "VM service is up on port $port." | tee -a "$log"
+
+          echo "== drive ==" | tee -a "$log"
+          flutter drive -v \
+            --use-existing-app="http://127.0.0.1:$port/" \
             --driver=test_driver/integration_test.dart \
             --target=integration_test/smoke_test.dart \
-            -d "$(cat "$CM_BUILD_DIR/smoke-sim-udid")" \
-            --enable-impeller --enable-flutter-gpu
-          echo $? > "$CM_BUILD_DIR/smoke-status"
+            -d "$udid" \
+            --enable-impeller --enable-flutter-gpu 2>&1 | tee -a "$log" &
+          pid=$!
+          waited=0
+          while kill -0 "$pid" 2>/dev/null; do
+            if [ "$waited" -ge 900 ]; then
+              echo "flutter drive is still running after 15 minutes; killing it." | tee -a "$log"
+              xcrun simctl list devices | grep -i "$udid" | tee -a "$log" || true
+              pkill -P "$pid" 2>/dev/null || true
+              kill "$pid" 2>/dev/null || true
+              sleep 5
+              kill -9 "$pid" 2>/dev/null || true
+              finish 124
+            fi
+            sleep 5; waited=$((waited + 5))
+          done
+          wait "$pid"
+          status=$?
+          xcrun simctl terminate "$udid" "$bundle_id" 2>/dev/null || true
+          finish "$status"
         ignore_failure: true
       - *script_publish_status
     artifacts:
       - examples/smoke_render/build/smoke/*.png
       - examples/smoke_render/build/smoke-status.txt
       - examples/smoke_render/build/flutter-version.txt
+      - examples/smoke_render/build/smoke-drive.log

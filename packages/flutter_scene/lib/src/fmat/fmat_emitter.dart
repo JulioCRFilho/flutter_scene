@@ -197,6 +197,13 @@ String emitFragmentGlsl(
     final define = _engineInputDefines[input];
     if (define != null) sb.writeln('#define $define');
   }
+  // Fragment math defaults to mediump; the engine includes opt positions,
+  // coordinates, and depth back into highp (see shaders/PRECISION.md). The
+  // material body below inherits the default like any engine source, and the
+  // define lets an include that runs in highp restore it.
+  sb.writeln('#define FLUTTER_SCENE_DEFAULT_FLOAT_PRECISION mediump');
+  sb.writeln('precision mediump float;');
+  sb.writeln('precision highp int;');
   sb.writeln('#include <material_varyings.glsl>');
   sb.writeln('#include <pbr.glsl>');
   if (material.shadingModel != FmatShadingModel.shadowCatcher) {
@@ -204,6 +211,7 @@ String emitFragmentGlsl(
   }
   sb.writeln('#include <normals.glsl>');
   sb.writeln('#include <material_inputs.glsl>');
+  sb.writeln('#include <material_debug.glsl>');
   if (material.shadingModel == FmatShadingModel.shadowCatcher) {
     // The catcher samples the shadow atlas and occlusion chain but never
     // evaluates the lighting, so it takes the engine bindings plus the
@@ -229,9 +237,12 @@ String emitFragmentGlsl(
   final uniforms = material.uniformParameters.toList();
   final samplers = material.samplerParameters.toList();
   if (uniforms.isNotEmpty) {
+    // The vertex stage declares the same block at its highp default, and a
+    // block shared by both stages must match member precision to link on
+    // WebGL2, so the members stay highp under the fragment mediump default.
     sb.writeln('uniform $kMaterialParamsBlock {');
     for (final p in uniforms) {
-      sb.writeln('  ${p.type.glslType} ${p.name};');
+      sb.writeln('  highp ${p.type.glslType} ${p.name};');
     }
     sb.writeln('}');
     sb.writeln('$kMaterialParamsInstance;');
@@ -297,6 +308,42 @@ String emitFragmentGlsl(
   if (!material.fragmentSource.endsWith('\n')) sb.writeln();
   sb.writeln();
 
+  // The shaded output, in a function so main() can pick it, the debug view,
+  // or a per-pixel split of the two without duplicating the tail.
+  sb.writeln('vec4 MaterialOutput(MaterialInputs material) {');
+  final additive = material.blending == FmatBlending.additive;
+  if (material.shadingModel == FmatShadingModel.shadowCatcher) {
+    sb.writeln(
+      '  // Shadow catcher: the surface color is the composed overlay,',
+    );
+    sb.writeln('  // output premultiplied without running the lighting.');
+    sb.writeln(
+      '  return vec4(material.base_color.rgb, 1.0) * material.base_color.a;',
+    );
+  } else if (lit) {
+    if (additive) {
+      // Zero the output alpha so an additive draw never darkens the
+      // destination, keeping the premultiplied color.
+      sb.writeln('  vec4 lit = EvaluateLighting(material);');
+      sb.writeln('  return vec4(lit.rgb, 0.0);');
+    } else {
+      sb.writeln('  return EvaluateLighting(material);');
+    }
+  } else {
+    sb.writeln('  // Unlit: output the surface color, premultiplied by alpha.');
+    if (additive) {
+      sb.writeln(
+        '  return vec4(material.base_color.rgb * material.base_color.a, 0.0);',
+      );
+    } else {
+      sb.writeln(
+        '  return vec4(material.base_color.rgb, 1.0) * material.base_color.a;',
+      );
+    }
+  }
+  sb.writeln('}');
+  sb.writeln();
+
   sb.writeln('void main() {');
   sb.writeln('  MaterialInputs material = InitMaterialInputs();');
   sb.writeln('  Surface(material);');
@@ -307,42 +354,27 @@ String emitFragmentGlsl(
       '$kFragmentKeepAliveInstance.keep_alive.x * $keepAlive;',
     );
   }
-  final additive = material.blending == FmatBlending.additive;
-  if (material.shadingModel == FmatShadingModel.shadowCatcher) {
-    sb.writeln(
-      '  // Shadow catcher: the surface color is the composed overlay,',
-    );
-    sb.writeln('  // output premultiplied without running the lighting.');
-    sb.writeln(
-      '  frag_color = vec4(material.base_color.rgb, 1.0) * '
-      'material.base_color.a;',
-    );
-  } else if (lit) {
-    if (additive) {
-      // Zero the output alpha so an additive draw never darkens the
-      // destination, keeping the premultiplied color.
-      sb.writeln('  vec4 lit = EvaluateLighting(material);');
-      sb.writeln('  frag_color = vec4(lit.rgb, 0.0);');
-    } else {
-      sb.writeln('  frag_color = EvaluateLighting(material);');
-    }
-  } else {
-    sb.writeln('  // Unlit: output the surface color, premultiplied by alpha.');
-    if (additive) {
-      sb.writeln(
-        '  frag_color = vec4(material.base_color.rgb * '
-        'material.base_color.a, 0.0);',
-      );
-    } else {
-      sb.writeln(
-        '  frag_color = vec4(material.base_color.rgb, 1.0) * '
-        'material.base_color.a;',
-      );
-    }
-  }
+  _writeDebugViewSelect(sb);
   sb.writeln('}');
 
   return sb.toString();
+}
+
+/// Writes the tail of a material's `main()`: the surface debug view when one
+/// is active, the shaded `MaterialOutput` otherwise, or both selected per
+/// pixel for a split. Every branch is under uniform control flow; the split
+/// evaluates both sides and selects, so the lit path never runs under a
+/// per-pixel branch.
+void _writeDebugViewSelect(StringBuffer sb) {
+  sb.writeln('  float debug_mode = DebugViewMode();');
+  sb.writeln('  if (debug_mode > 1.5) {');
+  sb.writeln('    frag_color = DebugViewSplit(DebugSurfaceOutput(material),');
+  sb.writeln('                                MaterialOutput(material));');
+  sb.writeln('  } else if (debug_mode > 0.5) {');
+  sb.writeln('    frag_color = DebugSurfaceOutput(material);');
+  sb.writeln('  } else {');
+  sb.writeln('    frag_color = MaterialOutput(material);');
+  sb.writeln('  }');
 }
 
 /// A scalar GLSL expression reading one component of [p] through the
@@ -637,9 +669,12 @@ String _emitSkyGlsl(
   final uniforms = material.uniformParameters.toList();
   final samplers = material.samplerParameters.toList();
   if (uniforms.isNotEmpty) {
+    // The vertex stage declares the same block at its highp default, and a
+    // block shared by both stages must match member precision to link on
+    // WebGL2, so the members stay highp under the fragment mediump default.
     sb.writeln('uniform $kMaterialParamsBlock {');
     for (final p in uniforms) {
-      sb.writeln('  ${p.type.glslType} ${p.name};');
+      sb.writeln('  highp ${p.type.glslType} ${p.name};');
     }
     sb.writeln('}');
     sb.writeln('$kMaterialParamsInstance;');

@@ -1,6 +1,13 @@
+import 'dart:developer' as developer;
+import 'dart:typed_data';
+
 import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
+import 'package:flutter_scene/src/render/draw_recorder.dart';
 import 'package:flutter_scene/src/render/frame_transients.dart';
 import 'package:flutter_scene/src/render/render_profile.dart';
+import 'package:flutter_scene/src/texture/texture_registry.dart'
+    show gpuTextureBytes;
+import 'package:flutter_scene/src/render/render_stats.dart';
 
 /// A typed scratch store passed between [RenderPass]es within a single
 /// frame.
@@ -81,6 +88,22 @@ class _RecordingBlackboard extends Blackboard {
   }
 }
 
+/// A [TransientWriter] view that reports every emplacement to a draw
+/// recorder, so a capture can attribute uniform bytes to the draw that
+/// follows them.
+class _RecordingTransientWriter implements TransientWriter {
+  _RecordingTransientWriter(this._inner, this._recorder);
+
+  final TransientWriter _inner;
+  final DrawRecorder _recorder;
+
+  @override
+  gpu.BufferView emplace(ByteData bytes) {
+    _recorder.onUniformEmplaced(bytes);
+    return _inner.emplace(bytes);
+  }
+}
+
 /// A [TransientTexturePool] view that reports acquisitions to an observer
 /// while delegating to the wrapped pool (which owns all texture state).
 /// {@category Rendering}
@@ -103,6 +126,9 @@ class ObservedTexturePool extends TransientTexturePool {
 
   @override
   void clear() => _inner.clear();
+
+  @override
+  int get residentBytes => _inner.residentBytes;
 }
 
 /// Description of a transient GPU texture requested from a
@@ -110,7 +136,9 @@ class ObservedTexturePool extends TransientTexturePool {
 ///
 /// Two descriptors that compare equal share a pool slot, so a pass that
 /// needs two live textures with otherwise-identical parameters in the
-/// same frame must distinguish them with [debugName].
+/// same frame must distinguish them with [debugName], and a color target
+/// that can be rendered with more than one depth setup must distinguish
+/// them with [attachmentKey].
 class TransientTextureDescriptor {
   const TransientTextureDescriptor({
     required this.width,
@@ -120,6 +148,7 @@ class TransientTextureDescriptor {
     this.storageMode = gpu.StorageMode.devicePrivate,
     this.enableShaderReadUsage = true,
     this.debugName,
+    this.attachmentKey,
   });
 
   /// A color render target at the given size/format with no MSAA.
@@ -128,6 +157,7 @@ class TransientTextureDescriptor {
     required int height,
     required gpu.PixelFormat format,
     String? debugName,
+    String? attachmentKey,
   }) : this(
          width: width,
          height: height,
@@ -135,6 +165,7 @@ class TransientTextureDescriptor {
          storageMode: gpu.StorageMode.devicePrivate,
          enableShaderReadUsage: true,
          debugName: debugName,
+         attachmentKey: attachmentKey,
        );
 
   /// A depth/stencil attachment at the given size. Lives in transient
@@ -169,6 +200,23 @@ class TransientTextureDescriptor {
   /// separate pool slots. Does not affect the allocated texture.
   final String? debugName;
 
+  /// Names the depth/stencil setup a color target is rendered with, so a
+  /// target that can be drawn with different depth attachments (or as an
+  /// MSAA resolve target with none) gets a separate pool slot per setup.
+  ///
+  /// The GLES backend caches one framebuffer per color texture and attaches
+  /// depth only when that framebuffer is first created, so reusing a texture
+  /// with a different depth attachment silently renders with the old one
+  /// (or with no depth test at all). Keeping each setup on its own texture
+  /// sidesteps that on every backend at the cost of one extra ring per
+  /// setup a view actually switches through. Must be stable across frames
+  /// for a given configuration; a per-frame value defeats pooling.
+  /// Does not affect the allocated texture.
+  // TODO(gles-fbo-cache): drop once the pubspec Flutter floor carries the
+  // engine fix that re-attaches depth/stencil when the cached FBO's
+  // attachments differ from the requested ones.
+  final String? attachmentKey;
+
   @override
   bool operator ==(Object other) =>
       other is TransientTextureDescriptor &&
@@ -178,7 +226,8 @@ class TransientTextureDescriptor {
       other.sampleCount == sampleCount &&
       other.storageMode == storageMode &&
       other.enableShaderReadUsage == enableShaderReadUsage &&
-      other.debugName == debugName;
+      other.debugName == debugName &&
+      other.attachmentKey == attachmentKey;
 
   @override
   int get hashCode => Object.hash(
@@ -189,6 +238,7 @@ class TransientTextureDescriptor {
     storageMode,
     enableShaderReadUsage,
     debugName,
+    attachmentKey,
   );
 }
 
@@ -239,8 +289,22 @@ class TransientTexturePool {
 
   /// Drops all cached textures. The next [acquire] for any descriptor
   /// reallocates. Call when the output size changes so stale-sized
-  /// textures aren't kept alive.
+  /// textures aren't kept alive, or to give the memory back under pressure.
+  ///
+  /// Safe at any point in a frame, since a pass that has already acquired a
+  /// texture holds its own reference and this releases only the pool's claim.
   void clear() => _rings.clear();
+
+  /// Resident bytes of every texture the pool holds, summed across mip chains.
+  int get residentBytes {
+    var bytes = 0;
+    for (final ring in _rings.values) {
+      for (final texture in ring) {
+        if (texture != null) bytes += gpuTextureBytes(texture);
+      }
+    }
+    return bytes;
+  }
 }
 
 /// Per-frame state handed to every [RenderGraphPass] when the graph
@@ -308,42 +372,68 @@ class RenderGraph {
   /// creates and submits its own command buffer. Clears the blackboard
   /// first so state never leaks between frames.
   ///
-  /// With an [observer] attached (a capture frame), passes run against a
-  /// recording blackboard, each pass is stopwatched, and boundaries are
-  /// reported; without one the steady-state path is unchanged.
+  /// Every pass is stopwatched and its counter delta recorded into [stats]
+  /// (when given), and emitted as a `dart:developer` timeline event when
+  /// [RenderStats.timelineEvents] is on. With an [observer] attached (a
+  /// capture frame), passes also run against a recording blackboard and
+  /// boundaries are reported to it.
   void execute({
     required TransientWriter transientsBuffer,
     required TransientTexturePool texturePool,
     RenderGraphObserver? observer,
+    RenderViewStats? stats,
   }) {
     _blackboard._clear();
+    // An observer that also records draws gets the encoders' draw context
+    // and every uniform emplacement for the frame.
+    final recorder = observer is DrawRecorder ? observer as DrawRecorder : null;
     final context = RenderGraphContext(
-      transientsBuffer: transientsBuffer,
+      transientsBuffer: recorder == null
+          ? transientsBuffer
+          : _RecordingTransientWriter(transientsBuffer, recorder),
       texturePool: texturePool,
       blackboard: observer == null
           ? _blackboard
           : _RecordingBlackboard(_blackboard, observer),
     );
-    if (observer != null) {
-      for (var i = 0; i < _passes.length; i++) {
-        final pass = _passes[i];
-        observer.onPassBegin(pass, i);
-        final stopwatch = Stopwatch()..start();
-        pass.execute(context);
-        stopwatch.stop();
-        observer.onPassEnd(pass, stopwatch.elapsedMicroseconds);
+    final timeline = RenderStats.timelineEvents;
+    final stopwatch = Stopwatch();
+    for (var i = 0; i < _passes.length; i++) {
+      final pass = _passes[i];
+      final passStats = stats == null
+          ? null
+          : RenderPassStats(name: pass.name, indexInGraph: i);
+      if (passStats != null) {
+        stats!.passes.add(passStats);
+        _passStart.copyFrom(activeRenderCounters);
       }
-      return;
-    }
-    for (final pass in _passes) {
-      if (!profileRendering) {
-        pass.execute(context);
-        continue;
+      observer?.onPassBegin(pass, i);
+      if (recorder != null) {
+        recorder.clearContext();
+        activeDrawRecorder = recorder;
       }
-      final stopwatch = Stopwatch()..start();
-      pass.execute(context);
+      if (timeline) developer.Timeline.startSync(pass.name);
+      stopwatch
+        ..reset()
+        ..start();
+      try {
+        pass.execute(context);
+      } finally {
+        activeDrawRecorder = null;
+      }
       stopwatch.stop();
-      _profile.add(pass.name, stopwatch.elapsedMicroseconds, trackMax: true);
+      if (timeline) developer.Timeline.finishSync();
+      final elapsed = stopwatch.elapsedMicroseconds;
+      // Settle the counters before the observer runs, since a capture copies
+      // textures at the pass boundary and those draws are not the pass's.
+      if (passStats != null) {
+        passStats.cpuMicros = elapsed;
+        passStats.counters.setDelta(_passStart, activeRenderCounters);
+      }
+      observer?.onPassEnd(pass, elapsed);
+      if (profileRendering) {
+        _profile.add(pass.name, elapsed, trackMax: true);
+      }
     }
     if (profileRendering) {
       final snapshot = _profile.endSample();
@@ -361,4 +451,6 @@ class RenderGraph {
       print('FLUTTER_SCENE_PROFILE $summary');
     }
   }
+
+  static final RenderCounters _passStart = RenderCounters();
 }

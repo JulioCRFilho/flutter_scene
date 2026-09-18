@@ -1,4 +1,6 @@
 import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
+import 'package:flutter_scene/src/render/draw_recorder.dart';
+import 'package:flutter_scene/src/render/render_stats.dart';
 
 void bindVertexBufferCompat(
   gpu.RenderPass pass,
@@ -26,7 +28,17 @@ void bindIndexBufferCompat(
   }
 }
 
+// Every engine draw funnels through these two, so the frame counters are
+// kept here rather than in each encoder.
+void _countDraw(int vertexCount, int instanceCount, {required bool indexed}) {
+  activeRenderCounters.draws++;
+  activeRenderCounters.instances += instanceCount;
+  activeRenderCounters.vertices += vertexCount * instanceCount;
+  activeDrawRecorder?.onDraw(vertexCount, instanceCount, indexed: indexed);
+}
+
 void drawCompat(gpu.RenderPass pass, int vertexCount, {int instanceCount = 1}) {
+  _countDraw(vertexCount, instanceCount, indexed: false);
   if (instanceCount != 1) {
     (pass as dynamic).draw(vertexCount, instanceCount: instanceCount);
     return;
@@ -43,6 +55,7 @@ void drawIndexedCompat(
   int indexCount, {
   int instanceCount = 1,
 }) {
+  _countDraw(indexCount, instanceCount, indexed: true);
   if (instanceCount != 1) {
     (pass as dynamic).drawIndexed(indexCount, instanceCount: instanceCount);
     return;

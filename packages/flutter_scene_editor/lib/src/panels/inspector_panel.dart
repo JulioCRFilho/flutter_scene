@@ -4,7 +4,7 @@ import 'package:collection/collection.dart' show DeepCollectionEquality;
 import 'package:scene/scene.dart';
 // ignore: implementation_imports
 import 'package:flutter_scene/src/fscene/realize/component_schema.dart';
-import 'package:flutter/material.dart' hide Matrix4, Step;
+import 'package:material_ui/material_ui.dart' hide Matrix4, Step;
 import 'package:flutter_scene/scene.dart'
     show Component, PointLightComponent, SpotLightComponent;
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;

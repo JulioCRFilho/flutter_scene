@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:vector_math/vector_math.dart';
 
 import 'package:flutter/foundation.dart' show ValueNotifier, internal;
+import 'package:flutter_scene/src/render/debug_view.dart';
 import 'package:flutter_scene/src/camera.dart';
 import 'package:flutter_scene/src/components/camera_component.dart';
 import 'package:flutter_scene/src/components/directional_light_component.dart';
@@ -22,6 +23,7 @@ import 'package:flutter_scene/src/render/bvh.dart';
 import 'package:flutter_scene/src/render/custom_render_pass.dart';
 import 'package:flutter_scene/src/render/lod.dart';
 import 'package:flutter_scene/src/render/render_layers.dart';
+import 'package:flutter_scene/src/render_view.dart';
 
 /// One drawable primitive in the flat render layer.
 ///
@@ -95,6 +97,10 @@ class RenderItem {
   /// intersects (`light.channelMask & lightChannelMask != 0`), and a
   /// directional light's caster mask is tested against it the same way.
   int lightChannelMask = 0xFF;
+
+  /// The owning node's effective surface debug view override, refreshed each
+  /// frame (null inherits the scene's view). See `Node.debugView`.
+  DebugView? debugView;
 
   /// Whether the owning node's world transform reverses triangle winding.
   bool nodeWindingFlipped = false;
@@ -697,6 +703,24 @@ class RenderScene {
   /// the first mounted [CameraComponent]'s camera, else null.
   Camera? get primaryCamera =>
       cameraOverride ?? (cameras.isEmpty ? null : cameras.first.toCamera());
+
+  Camera? _lastViewCamera;
+
+  /// Records the views a frame renders, so [listenerCamera] can follow the
+  /// first on-screen one (or the first view when all render offscreen).
+  void recordRenderedViews(List<RenderView> views) {
+    if (views.isEmpty) return;
+    _lastViewCamera = views
+        .firstWhere((view) => view.target == null, orElse: () => views.first)
+        .camera;
+  }
+
+  /// The camera the audio listener follows when no `AudioListener` is
+  /// mounted: [primaryCamera], else the camera of the last recorded on-screen
+  /// view (a `SceneView`'s camera or camera builder). A tick that runs before
+  /// render sees the previous frame's view, so the ears trail a moving view
+  /// camera by one frame.
+  Camera? get listenerCamera => primaryCamera ?? _lastViewCamera;
 
   Bvh _bvh = Bvh.build([]);
   int _structureRevision = 0;

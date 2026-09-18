@@ -82,6 +82,9 @@ class TextureTransform {
 /// [baseColorFactor]'s alpha component.
 /// {@category Materials}
 class PhysicallyBasedMaterial extends Material {
+  @override
+  bool get participatesInDebugViews => true;
+
   /// Creates a PBR material with the given textures.
   ///
   /// All textures are optional; missing textures are replaced with
@@ -1489,9 +1492,17 @@ class PhysicallyBasedMaterial extends Material {
         super.fragmentShaderForLighting(lighting);
   }
 
+  // The filtered pyramid is only sampled when the lod fraction is nonzero
+  // (a rough surface behind a refractive index), so smooth glass declares
+  // the sharp capture alone and skips the per-batch filter passes.
   @override
   Set<RenderInput> get sceneInputs => transmission > 0.0
-      ? const {RenderInput.opaqueSceneColor, RenderInput.filteredSceneColor}
+      ? sceneColorSampleFilterLodFraction > 0.0
+            ? const {
+                RenderInput.opaqueSceneColor,
+                RenderInput.filteredSceneColor,
+              }
+            : const {RenderInput.opaqueSceneColor}
       : const {};
 
   @override
@@ -1714,6 +1725,12 @@ class PhysicallyBasedMaterial extends Material {
       );
     }
     EngineLightingUniforms.bindFog(pass, shader, transientsBuffer, lighting);
+    EngineLightingUniforms.bindViewInfo(
+      pass,
+      shader,
+      transientsBuffer,
+      lighting,
+    );
   }
 
   static final Float32List _fragInfoScratch = Float32List(

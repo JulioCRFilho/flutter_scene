@@ -2,6 +2,7 @@ import 'package:flutter_scene/src/geometry/geometry.dart'
     show Geometry, bindUnskinnedFrameInfo;
 import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
 import 'package:flutter_scene/src/light.dart' show ShadowCasterFaces;
+import 'package:flutter_scene/src/render/draw_recorder.dart';
 import 'package:flutter_scene/src/render/instance_batching.dart';
 import 'package:flutter_scene/src/render/instance_packing.dart';
 import 'package:vector_math/vector_math.dart';
@@ -55,6 +56,7 @@ class ShadowEncoder {
     ShadowCasterFaces casterFaces, {
     ShadowCasterFilter filter = ShadowCasterFilter.all,
     int casterChannelMask = 0xFF,
+    this.receiverPlanes = const [],
   }) : _filter = filter,
        _casterChannelMask = casterChannelMask {
     frustum = Frustum.matrix(_lightSpaceMatrix);
@@ -109,6 +111,10 @@ class ShadowEncoder {
   /// culling.
   late final Frustum frustum;
 
+  /// Extra planes rejecting casters that cannot shadow a visible receiver
+  /// (see `shadowReceiverCullingPlanes`), tested alongside [frustum].
+  final List<Plane> receiverPlanes;
+
   final Aabb3 _cullScratchAabb = Aabb3();
 
   /// The pipeline currently bound on the render pass, or null before the
@@ -139,9 +145,22 @@ class ShadowEncoder {
           ..copyFrom(bounds)
           ..transform(item.worldTransform);
         if (!frustum.intersectsWithAabb3(_cullScratchAabb)) return;
+        for (final plane in receiverPlanes) {
+          if (_aabbOutsidePlane(_cullScratchAabb, plane)) return;
+        }
       }
     }
     _records.add(item);
+  }
+
+  // Matches the Bvh's plane test: outside when the corner farthest along the
+  // normal is below the plane.
+  static bool _aabbOutsidePlane(Aabb3 box, Plane plane) {
+    final n = plane.normal;
+    final x = n.x < 0 ? box.min.x : box.max.x;
+    final y = n.y < 0 ? box.min.y : box.max.y;
+    final z = n.z < 0 ? box.min.z : box.max.z;
+    return n.x * x + n.y * y + n.z * z + plane.constant < 0;
   }
 
   /// Emits the accepted casters, merging compatible spatial cells back into
@@ -226,6 +245,18 @@ class ShadowEncoder {
       _boundPipeline = pipeline;
     }
     _renderPass.setPrimitiveType(geometry.primitiveType);
+    activeDrawRecorder?.setContext(
+      DrawContext(
+        phase: DrawPhase.shadow,
+        item: item,
+        geometry: geometry,
+        material: item.material,
+        vertexShader: activeVertex,
+        fragmentShader: fragmentShader,
+        pipeline: pipeline,
+        batchedItems: batches?.length ?? 1,
+      ),
+    );
 
     // Binds the vertex/index buffers and the per-frame uniform for one draw.
     // The light-space matrix takes the place of the camera transform (the depth

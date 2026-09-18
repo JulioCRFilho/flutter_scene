@@ -32,6 +32,9 @@ import 'package:flutter_scene/src/texture/texture2d.dart';
 /// comes from the material's metadata.
 /// {@category Materials}
 class PreprocessedMaterial extends Material implements HotReloadableFmat {
+  @override
+  bool get participatesInDebugViews => true;
+
   PreprocessedMaterial({
     required gpu.Shader fragmentShader,
     required Map<String, Object?> metadata,
@@ -378,6 +381,14 @@ class PreprocessedMaterial extends Material implements HotReloadableFmat {
         );
       }
     }
+    // Every shading model's Surface() and debug hook may read
+    // GetViewDirection.
+    EngineLightingUniforms.bindViewInfo(
+      pass,
+      shader,
+      transientsBuffer,
+      lighting,
+    );
 
     parameters.bind(pass, shader, transientsBuffer);
     // Bind the fragment keep-alive block (name matches kFragmentKeepAliveBlock

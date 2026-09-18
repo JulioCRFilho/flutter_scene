@@ -3,7 +3,9 @@ import 'dart:ui' show Offset;
 
 import 'package:vector_math/vector_math.dart';
 
+import 'package:flutter_scene/src/camera.dart';
 import 'package:flutter_scene/src/camera_controllers/camera_controller.dart';
+import 'package:flutter_scene/src/components/camera_component.dart';
 
 /// Orbits the camera around a fixed [target] point: drag rotates, scroll or
 /// pinch dollies in and out, and a two-finger or secondary drag pans the
@@ -13,6 +15,13 @@ import 'package:flutter_scene/src/camera_controllers/camera_controller.dart';
 /// elevation clamped just short of straight up/down, so the horizon stays
 /// level and the view never flips over the poles. Distance-scaled dolly keeps
 /// the zoom feeling constant whether the camera is close or far.
+///
+/// With an [OrthographicProjection], where moving the eye does not change the
+/// image size, dolly scales the projection's [OrthographicProjection.zoom]
+/// by the same ratio instead, so zoom set in code or an inspector is kept and
+/// scaled from. The eye holds the distance it had when the controller started
+/// driving that projection, so the clip planes stay where they were
+/// authored.
 ///
 /// Attach it to a node that also carries a [CameraComponent]. Drive it with a
 /// [CameraControls] widget, or call [orbitBy] / [dollyBy] / [panBy] directly.
@@ -71,6 +80,12 @@ class OrbitCameraController extends CameraController {
   Vector3 _targetGoal;
   double _distance;
   double _distanceGoal;
+  // The orthographic projection this controller drives, the eye distance it
+  // holds for it, and the distance its zoom was last scaled at. Null for
+  // perspective; replaced when a new projection is assigned.
+  ({OrthographicProjection projection, double eyeDistance, double zoomedAt})?
+  _orthographic;
+
   double _azimuth;
   double _azimuthGoal;
   double _polar;
@@ -105,7 +120,8 @@ class OrbitCameraController extends CameraController {
   /// Pans the target across the view by [fraction] of the viewport (its
   /// components in `[-1, 1]`), scaled by distance so the world tracks the drag.
   void panBy(Offset fraction) {
-    final forward = (_targetGoal - _eyeFor(_targetGoal)).normalized();
+    final forward = (_targetGoal - _eyeFor(_targetGoal, _distance))
+        .normalized();
     final right = Vector3(0.0, 1.0, 0.0).cross(forward)..normalize();
     final up = forward.cross(right)..normalize();
     final shift =
@@ -160,14 +176,39 @@ class OrbitCameraController extends CameraController {
     _polar += (_polarGoal - _polar) * r;
     _distance += (_distanceGoal - _distance) * r;
     _target += (_targetGoal - _target) * r;
-    node.lookAtFrom(_eyeFor(_target), _target);
+    var eyeDistance = _distance;
+    final projection = node.getComponent<CameraComponent>()?.projection;
+    if (projection is OrthographicProjection) {
+      var state = _orthographic;
+      if (state == null || !identical(state.projection, projection)) {
+        state = (
+          projection: projection,
+          eyeDistance: _distance,
+          zoomedAt: _distance,
+        );
+      } else if (_distance != state.zoomedAt) {
+        // Scale by this frame's dolly only, so zoom set elsewhere survives.
+        projection.zoom *= state.zoomedAt / _distance;
+        state = (
+          projection: projection,
+          eyeDistance: state.eyeDistance,
+          zoomedAt: _distance,
+        );
+      }
+      _orthographic = state;
+      eyeDistance = state.eyeDistance;
+    } else {
+      _orthographic = null;
+    }
+    node.lookAtFrom(_eyeFor(_target, eyeDistance), _target);
   }
 
-  // The camera eye for a given pivot, from the current azimuth/polar/distance.
-  Vector3 _eyeFor(Vector3 pivot) {
-    final horizontal = math.cos(_polar) * _distance;
+  // The camera eye for a given pivot, from the current azimuth/polar and
+  // [distance].
+  Vector3 _eyeFor(Vector3 pivot, double distance) {
+    final horizontal = math.cos(_polar) * distance;
     return pivot +
         Vector3(-math.sin(_azimuth), 0.0, -math.cos(_azimuth)) * horizontal +
-        Vector3(0.0, math.sin(_polar) * _distance, 0.0);
+        Vector3(0.0, math.sin(_polar) * distance, 0.0);
   }
 }

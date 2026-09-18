@@ -4,7 +4,8 @@ import 'dart:math' as math;
 // ignore: implementation_imports
 import 'package:scene/scene.dart';
 // ignore: implementation_imports
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
+// Not re-exported through material_ui.
 import 'package:flutter/services.dart';
 
 import '../controller/editor_controller.dart';

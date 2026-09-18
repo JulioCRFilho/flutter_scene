@@ -43,7 +43,7 @@ class SmokeScene {
   });
 
   final String id;
-  final ({Scene scene, PerspectiveCamera camera}) Function() setup;
+  final ({Scene scene, Camera camera}) Function() setup;
   final Future<void> Function()? preload;
 
   /// Frames to render before the capture, for a feature that converges over
@@ -525,6 +525,36 @@ MeshGeometry _phaseGrid() {
   // against SwiftShader if the fault is there.
   return MeshGeometry.fromArrays(positions: positions, indices: indices)
     ..setCustomAttribute('phase', phase, components: 1);
+}
+
+/// Outlines depth and normal edges from the engine's geometry buffers.
+class _ViewEdgesPass extends CustomRenderPass {
+  @override
+  String get name => 'view_edges';
+
+  @override
+  RenderStage get stage => RenderStage.afterScene;
+
+  @override
+  Set<RenderInput> get inputs => const {RenderInput.normals};
+
+  @override
+  void execute(RenderPassContext context) {
+    final depth = context.sceneDepthLinear;
+    if (depth == null) return;
+    context.applyShader(
+      _rawPairLibrary!['ViewEdgesFragment']!,
+      textures: {'input_depth': depth},
+      samplers: {
+        'input_depth': gpu.SamplerOptions(
+          minFilter: gpu.MinMagFilter.nearest,
+          magFilter: gpu.MinMagFilter.nearest,
+        ),
+      },
+      uniforms: {'PostCameraInfo': context.cameraInfo},
+      frameInfo: true,
+    );
+  }
 }
 
 class _NormalsProbePass extends CustomRenderPass {
@@ -1398,6 +1428,98 @@ final List<SmokeScene> kSmokeScenes = <SmokeScene>[
     scene.add(caster);
     return (scene: scene, camera: _shadowCamera());
   }),
+  // An isometric orthographic camera whose view volume starts behind the eye
+  // (the eye sits inside the scene), with a shadowed sun, ambient occlusion,
+  // and a custom pass outlining depth and normal edges. A backend or effect
+  // that still assumes perspective reconstruction draws misplaced shadows,
+  // occlusion, or outlines, and geometry behind the eye clips away.
+  SmokeScene('orthographic_camera', () {
+    final scene = Scene();
+    _configureAmbientOcclusion(scene);
+    scene.addRenderPass(_ViewEdgesPass());
+    scene.add(
+      _directionalLightNode(
+        vm.Vector3(-0.4, -1.0, -0.25),
+        DirectionalLight(castsShadow: true, shadowMaxDistance: 12.0),
+      ),
+    );
+    scene.add(
+      Node(
+        mesh: Mesh(
+          PlaneGeometry(width: 3.0, depth: 3.0),
+          PhysicallyBasedMaterial()
+            ..baseColorFactor = vm.Vector4(0.78, 0.78, 0.80, 1.0)
+            ..metallicFactor = 0.0
+            ..roughnessFactor = 0.9
+            ..vertexColorWeight = 0.0,
+        ),
+      ),
+    );
+    final colors = [
+      vm.Vector4(0.85, 0.45, 0.25, 1.0),
+      vm.Vector4(0.30, 0.65, 0.45, 1.0),
+      vm.Vector4(0.30, 0.45, 0.85, 1.0),
+    ];
+    for (var i = 0; i < 3; i++) {
+      scene.add(
+        _cuboid(colors[i], 0.0, 0.6)
+          ..localTransform =
+              vm.Matrix4.translation(
+                vm.Vector3(-0.8 + i * 0.8, 0.5 + i * 0.35, 0.6 - i * 0.6),
+              ) *
+              vm.Matrix4.rotationY(0.3 * i),
+      );
+    }
+    return (
+      scene: scene,
+      camera: OrthographicCamera(
+        position: vm.Vector3(0.4, 0.4, 0.4),
+        target: vm.Vector3.zero(),
+        projection: OrthographicProjection(
+          size: const OrthographicSize.contain(5.2, 5.2),
+          near: -10.0,
+          far: 10.0,
+        ),
+      ),
+    );
+  }, preload: loadSmokeMaterials),
+  // The surface debug views. The left half is the lit shadow scene, the
+  // right half its world normals (split at the middle), and the wireframe
+  // overlay traces every edge on both. Covers the material hook, the split
+  // select, the resolve bypass, and the edge overlay in one frame; a
+  // backend whose hook does not compile draws the whole scene wrong.
+  SmokeScene('debug_view', () {
+    final scene = Scene();
+    scene.add(
+      _directionalLightNode(
+        vm.Vector3(-0.4, -1.0, -0.35),
+        DirectionalLight(castsShadow: true, shadowMaxDistance: 20.0),
+      ),
+    );
+    scene.add(
+      Node(
+        mesh: Mesh(
+          PlaneGeometry(width: 3.0, depth: 3.0),
+          PhysicallyBasedMaterial()
+            ..baseColorFactor = vm.Vector4(0.78, 0.78, 0.80, 1.0)
+            ..metallicFactor = 0.0
+            ..roughnessFactor = 0.9
+            ..vertexColorWeight = 0.0,
+        ),
+      ),
+    );
+    final caster = _cuboid(vm.Vector4(0.85, 0.45, 0.25, 1.0), 0.0, 0.6)
+      ..localTransform =
+          vm.Matrix4.translation(vm.Vector3(0, 1.0, 0)) *
+          vm.Matrix4.rotationY(0.6);
+    scene.add(caster);
+    scene.debug.view = const DebugView(
+      channel: SurfaceDebugChannel.worldNormal,
+    );
+    scene.debug.split = 0.5;
+    scene.debug.overlays.add(DebugOverlay.wireframe);
+    return (scene: scene, camera: _shadowCamera());
+  }),
   // Both shadow-catcher modes in one frame, two catcher planes side by side
   // under one shadow-casting sun, each with the same chiral caster above it.
   // One plane bakes its footprint cache, the other samples the atlas live,
@@ -2036,6 +2158,56 @@ final List<SmokeScene> kSmokeScenes = <SmokeScene>[
   }, preload: loadSmokeMaterials),
 ];
 
+/// A near red square in front of a far green wall, for the anti-aliasing
+/// switch probe. Not part of [kSmokeScenes]; its test samples the center
+/// pixel numerically after switching the scene from MSAA to none. Both
+/// surfaces live in one mesh with the wall's triangles indexed after the
+/// square's, so the draw order is fixed regardless of sorting; a frame that
+/// lost its depth test paints the wall over the square and the center reads
+/// green instead of red.
+({Scene scene, PerspectiveCamera camera}) buildDepthPairingScene() {
+  final scene = Scene()
+    ..toneMapping = ToneMappingMode.linear
+    ..environment = EnvironmentMap.empty();
+  final positions = <double>[];
+  final colors = <double>[];
+  final indices = <int>[];
+  // Emits a camera-facing square with both windings, so the probe does not
+  // depend on the cull mode.
+  void square(double half, double z, List<double> color) {
+    final base = positions.length ~/ 3;
+    for (final (x, y) in [
+      (-half, -half),
+      (half, -half),
+      (half, half),
+      (-half, half),
+    ]) {
+      positions.addAll([x, y, z]);
+      colors.addAll(color);
+    }
+    indices.addAll([base, base + 1, base + 2, base, base + 2, base + 3]);
+    indices.addAll([base, base + 2, base + 1, base, base + 3, base + 2]);
+  }
+
+  square(0.5, -2.0, [1.0, 0.0, 0.0, 1.0]);
+  square(3.0, -6.0, [0.0, 1.0, 0.0, 1.0]);
+  final geometry = MeshGeometry.fromArrays(
+    positions: Float32List.fromList(positions),
+    colors: Float32List.fromList(colors),
+    indices: indices,
+  );
+  scene.add(
+    Node(mesh: Mesh(geometry, UnlitMaterial()..vertexColorWeight = 1.0)),
+  );
+  return (
+    scene: scene,
+    camera: PerspectiveCamera(
+      position: vm.Vector3(0, 0, 3.0),
+      target: vm.Vector3(0, 0, -6.0),
+    ),
+  );
+}
+
 /// Renders one [SmokeScene] into a fixed-size [RepaintBoundary] over the
 /// magenta clear.
 /// The CPU/GPU noise parity probe (see `assets/noise_parity.fmat`). Not part
@@ -2074,12 +2246,15 @@ class SmokeSceneView extends StatefulWidget {
   final SmokeScene scene;
 
   @override
-  State<SmokeSceneView> createState() => _SmokeSceneViewState();
+  State<SmokeSceneView> createState() => SmokeSceneViewState();
 }
 
-class _SmokeSceneViewState extends State<SmokeSceneView> {
+class SmokeSceneViewState extends State<SmokeSceneView> {
   late final Scene _scene;
-  late final PerspectiveCamera _camera;
+  late final Camera _camera;
+
+  /// The rendered scene, for the test's frame diagnostics.
+  Scene get scene => _scene;
 
   @override
   void initState() {
@@ -2119,7 +2294,7 @@ class _SmokePainter extends CustomPainter {
   _SmokePainter(this.scene, this.camera);
 
   final Scene scene;
-  final PerspectiveCamera camera;
+  final Camera camera;
 
   @override
   void paint(Canvas canvas, Size size) {

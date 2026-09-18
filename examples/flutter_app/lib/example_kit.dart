@@ -5,11 +5,13 @@ import 'package:flutter/material.dart' hide Material;
 import 'package:flutter/services.dart';
 import 'package:flutter_scene/kit.dart';
 import 'package:flutter_scene/scene.dart';
+import 'package:flutter_scene_input/flutter_scene_input.dart';
 import 'package:vector_math/vector_math.dart' as vm;
 
 import 'example_action_hint.dart';
 import 'example_overlay.dart';
 import 'example_panel.dart';
+import 'input/controls_screen.dart';
 import 'kit/kit_controls.dart';
 
 enum _KitScenario {
@@ -525,7 +527,6 @@ class _KitStageState extends State<_KitStage> {
   double _dashAirborneBlend = 0.0;
   bool _prevGrounded = true;
   final CameraShake _shake = CameraShake();
-  vm.Vector2 _joystickInput = vm.Vector2.zero();
 
   // Day/Night scenario
   DayNightCycleComponent? _dayNight;
@@ -553,15 +554,53 @@ class _KitStageState extends State<_KitStage> {
   double _cachedMinDistance = -1.0;
 
   double _elapsed = 0.0;
-  final Set<LogicalKeyboardKey> _pressedKeys = {};
+  // The character reads actions, not keys. The on-screen joystick and jump
+  // button inject into the same player, so keyboard, gamepad, and touch all
+  // drive one action set.
+  final InputSystem _input = InputSystem();
+  late final PlayerInput _player = _input.defaultPlayer;
 
-  final GeometryBufferArena _debugBufferArena = GeometryBufferArena();
+  static const _move = VectorAction('move');
+  static const _jump = ButtonAction('jump');
+  static const _sprint = ButtonAction('sprint');
+
+  static final _characterActions = ActionSet('character', {
+    _move: {
+      'keyboard': DpadBinding(
+        up: PhysicalKeyboardKey.keyW.control,
+        down: PhysicalKeyboardKey.keyS.control,
+        left: PhysicalKeyboardKey.keyA.control,
+        right: PhysicalKeyboardKey.keyD.control,
+      ),
+      'arrows': DpadBinding(
+        up: PhysicalKeyboardKey.arrowUp.control,
+        down: PhysicalKeyboardKey.arrowDown.control,
+        left: PhysicalKeyboardKey.arrowLeft.control,
+        right: PhysicalKeyboardKey.arrowRight.control,
+      ),
+      'gamepad': const StickBinding(
+        GamepadControl.leftStick,
+        processors: [Deadzone(0.15)],
+      ),
+    },
+    _jump: {
+      'keyboard': ButtonBinding(PhysicalKeyboardKey.space.control),
+      'gamepad': const ButtonBinding(GamepadControl.south),
+    },
+    _sprint: {
+      'keyboard': ButtonBinding(PhysicalKeyboardKey.shiftLeft.control),
+      'gamepad': const ButtonBinding(GamepadControl.leftStickPress),
+    },
+  });
+
   final UnlitMaterial _debugMaterial = UnlitMaterial();
+  MeshGeometry? _debugGeometry;
 
   @override
   void initState() {
     super.initState();
-    HardwareKeyboard.instance.addHandler(_handleKeyEvent);
+    FlutterInputSources.ensure(_input);
+    _player.contexts.push(_characterActions);
     _buildScene();
   }
 
@@ -576,22 +615,14 @@ class _KitStageState extends State<_KitStage> {
 
   @override
   void dispose() {
-    HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
+    FlutterInputSources.remove(_input);
     scene.removeAll();
     super.dispose();
   }
 
-  bool _handleKeyEvent(KeyEvent event) {
-    if (event is KeyDownEvent) {
-      _pressedKeys.add(event.logicalKey);
-    } else if (event is KeyUpEvent) {
-      _pressedKeys.remove(event.logicalKey);
-    }
-    return false;
-  }
-
   void _buildScene() {
     scene = Scene();
+    scene.attachInput(_input);
     _cameraNode = Node();
     _nodeCamera = NodeCamera(
       _cameraNode,
@@ -716,7 +747,18 @@ class _KitStageState extends State<_KitStage> {
       obstacleRadius: 0.85,
       obstacleHeight: 1.8,
     );
-    _characterNode!.addComponent(_characterController!);
+    // Added before the controller so input lands the same frame.
+    _characterNode!
+      ..addComponent(
+        CharacterInputDriver(
+          move: _move,
+          sprint: _sprint,
+          jump: _jump,
+          // Movement follows the third-person camera's heading.
+          cameraHeadingYaw: () => widget.settings.cameraOrbitYaw,
+        )..player = _player,
+      )
+      ..addComponent(_characterController!);
 
     _springArm = SpringArmComponent(
       targetLength: widget.settings.armLength,
@@ -1066,6 +1108,9 @@ class _KitStageState extends State<_KitStage> {
   }
 
   void _buildDebugVisuals() {
+    // One updatable geometry, rebuilt in place each frame.
+    _debugGeometry = DebugDraw.createGeometry();
+    _debugMeshNode.mesh = Mesh(_debugGeometry!, _debugMaterial);
     scene.add(_debugMeshNode);
     final groundMesh = PlaneGeometry(width: 24, depth: 24);
     final groundMat = PhysicallyBasedMaterial()
@@ -1169,14 +1214,34 @@ class _KitStageState extends State<_KitStage> {
         ),
         if (widget.scenario == _KitScenario.characterCamera) ...[
           Positioned(
+            top: 72,
+            right: 16,
+            child: FilledButton.tonalIcon(
+              icon: const Icon(Icons.sports_esports),
+              label: const Text('Controls'),
+              onPressed: () => ControlsScreen.show(
+                context,
+                player: _player,
+                set: _characterActions,
+                entries: const [
+                  ControlsEntry(_move, 'Move'),
+                  ControlsEntry(_jump, 'Jump'),
+                  ControlsEntry(_sprint, 'Sprint'),
+                ],
+              ),
+            ),
+          ),
+          Positioned(
             bottom: 24,
             right: 24,
             child: VirtualJoystick(
               radius: 45.0,
               knobRadius: 16.0,
               onChanged: (v) {
-                // VirtualJoystick emits screen coordinates (+Y downward); invert Y for 3D forward
-                _joystickInput = vm.Vector2(v.x, -v.y);
+                // VirtualJoystick emits screen coordinates (+Y downward).
+                _player
+                  ..inject(GamepadControl.leftStickX, v.x)
+                  ..inject(GamepadControl.leftStickY, -v.y);
               },
             ),
           ),
@@ -1186,7 +1251,11 @@ class _KitStageState extends State<_KitStage> {
             child: FloatingActionButton.small(
               backgroundColor: Colors.blueAccent.withValues(alpha: 0.8),
               onPressed: () {
-                _characterController?.jump();
+                // A press and release inside one frame still reads as a
+                // jump press.
+                _player
+                  ..inject(GamepadControl.south, 1)
+                  ..inject(GamepadControl.south, 0);
                 _shake.addTrauma(0.2);
               },
               child: const Icon(Icons.arrow_upward, color: Colors.white),
@@ -1241,40 +1310,6 @@ class _KitStageState extends State<_KitStage> {
 
   void _tickCharacter(double dt) {
     if (_characterController == null) return;
-
-    var mx = 0.0;
-    var my = 0.0;
-    if (_pressedKeys.contains(LogicalKeyboardKey.keyW) ||
-        _pressedKeys.contains(LogicalKeyboardKey.arrowUp)) {
-      my += 1.0;
-    }
-    if (_pressedKeys.contains(LogicalKeyboardKey.keyS) ||
-        _pressedKeys.contains(LogicalKeyboardKey.arrowDown)) {
-      my -= 1.0;
-    }
-    if (_pressedKeys.contains(LogicalKeyboardKey.keyD) ||
-        _pressedKeys.contains(LogicalKeyboardKey.arrowRight)) {
-      mx += 1.0;
-    }
-    if (_pressedKeys.contains(LogicalKeyboardKey.keyA) ||
-        _pressedKeys.contains(LogicalKeyboardKey.arrowLeft)) {
-      mx -= 1.0;
-    }
-
-    final moveX = mx != 0.0 ? mx : _joystickInput.x;
-    final moveY = my != 0.0 ? my : _joystickInput.y;
-    final isSprinting = _pressedKeys.contains(LogicalKeyboardKey.shiftLeft);
-
-    // Pass camera heading yaw so movement aligns with the third-person camera view
-    _characterController!.setMoveInput(
-      vm.Vector2(moveX, moveY),
-      isRunning: isSprinting,
-      cameraHeadingYaw: widget.settings.cameraOrbitYaw,
-    );
-
-    if (_pressedKeys.contains(LogicalKeyboardKey.space)) {
-      _characterController!.jump();
-    }
 
     _characterController!.walkSpeed = widget.settings.walkSpeed;
     _characterController!.jumpVelocity = widget.settings.jumpVelocity;
@@ -1556,11 +1591,7 @@ class _KitStageState extends State<_KitStage> {
       color: vm.Vector4(1.0, 0.8, 0.2, 0.7),
     );
 
-    // Flush to mesh reusing persistent arena
-    final mesh = DebugDraw.flushMesh(bufferArena: _debugBufferArena);
-    if (mesh != null) {
-      _debugMeshNode.mesh = Mesh(mesh, _debugMaterial);
-    }
+    DebugDraw.flushInto(_debugGeometry!);
 
     scene.update(dt);
   }

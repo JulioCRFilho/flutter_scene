@@ -55,9 +55,12 @@ void main() {
     // names the far sentinel, so the value is locked through the constant and
     // through the unprojection that reuses it.
     expect(header, contains('vec3 result = vec3(0.0);'));
-    expect(header, contains('float result = 1.0e8;'));
+    expect(header, contains('highp float result = 1.0e8;'));
     expect(emitter, contains('return vec3(0.0);'));
-    expect(emitter, contains('const float kSceneDepthUnavailable = 1.0e8;'));
+    expect(
+      emitter,
+      contains('const highp float kSceneDepthUnavailable = 1.0e8;'),
+    );
     expect(emitter, contains('return kSceneDepthUnavailable;'));
     // An unavailable depth unprojects to that same distance, so a projection
     // volume's inside test lands outside instead of on its own boundary.
@@ -74,14 +77,21 @@ void main() {
   });
 
   test('the block matches what bindSceneInputInfo packs', () {
-    // Five vec4s in this order, which is the Float32List the engine writes.
+    // Six vec4s in this order, which is the Float32List the engine writes.
     final block = header.substring(
       header.indexOf('uniform SceneInputInfo'),
       header.indexOf('scene_input_info;'),
     );
     expect(
       RegExp(r'vec4 (\w+);').allMatches(block).map((m) => m.group(1)).toList(),
-      ['available', 'screen', 'camera_forward', 'camera_right', 'camera_up'],
+      [
+        'available',
+        'screen',
+        'camera_forward',
+        'camera_right',
+        'camera_up',
+        'view_projection',
+      ],
     );
   });
 }

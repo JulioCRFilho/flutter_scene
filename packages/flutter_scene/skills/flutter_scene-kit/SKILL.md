@@ -1,6 +1,6 @@
 ---
 name: flutter_scene-kit
-version: 4
+version: 6
 description: Build interactive 3D gameplay, character controllers, camera rigs, dynamic day/night cycles, water surfaces, audio, pooling, and debug overlays in flutter_scene. Use when creating game mechanics, camera controls, NPC behaviors, atmospheric environments, or diagnostic HUDs.
 ---
 
@@ -132,7 +132,7 @@ final waterNormal = surface.normal;
 
 ## Immediate-mode debug visualization
 
-`DebugDraw` provides static immediate-mode line, ray, box, sphere, and axis drawing utilities for physics debugging and AI visualizers.
+`DebugDraw` provides static immediate-mode line, ray, box, sphere, axis, and physics collider drawing utilities for physics debugging and AI visualizers.
 
 ```dart
 DebugDraw.line(startPos, endPos, color: vm.Vector4(1, 0, 0, 1));
@@ -140,9 +140,15 @@ DebugDraw.box(aabb, color: vm.Vector4(0, 1, 0, 1));
 DebugDraw.sphere(center, 1.0, color: vm.Vector4(0, 0, 1, 1));
 DebugDraw.axes(node.globalTransform, size: 2.0);
 
-// Render debug lines
-final debugMesh = DebugDraw.flushMesh();
-if (debugMesh != null) {
-  debugNode.mesh = Mesh(debugMesh, UnlitMaterial());
-}
+// Every collider under a node, posed the way the simulation sees it.
+// Triggers draw in triggerColor. DebugDraw.shape draws a single posed Shape.
+DebugDraw.colliders(scene.root);
+
+// Render debug lines: one updatable geometry, rebuilt in place each frame.
+final debugGeometry = DebugDraw.createGeometry();
+debugNode.mesh = Mesh(debugGeometry, UnlitMaterial());
+// Per frame, after the DebugDraw calls:
+DebugDraw.flushInto(debugGeometry);
 ```
+
+`DebugDraw.flushMesh()` builds a new geometry per call; it suits a one-off capture, not a per-frame loop.

@@ -70,12 +70,22 @@ material)`; `Mesh.clone()` (shallow, shares geometry+material); `Mesh.localBound
 - `PerspectiveCamera.framing(Aabb3 bounds, {direction, fovRadiansY, up, margin = 1.1})`.
 - `PerspectiveProjection({fovRadiansY, near = 0.1, far = 1000.0})` and abstract `CameraProjection`,
   `Camera`. Camera helpers: `screenPointToRay`, `worldToScreen`, `getViewMatrix`, `getFrustum`.
-- There is NO `OrthographicCamera`. Implement `CameraProjection`/`Camera` for other projections.
+- `OrthographicCamera({OrthographicProjection? projection, Vector3? position, target, up})` and
+  `OrthographicCamera.framing(bounds, {direction, up, margin})`.
+- `OrthographicProjection({OrthographicSize size = OrthographicSize.height(10), zoom = 1.0,
+  Vector2? offset, near = 0.0, far = 1000.0})`, plus `.bounds(left:, right:, bottom:, top:)` and
+  `.matchingPerspective(fovRadiansY:, distance:)`. Sizes are FULL world extents, never half:
+  `OrthographicSize.height(h)`, `.width(w)`, `.contain(w, h)`, `.cover(w, h)`, `.stretch(w, h)`,
+  or `.pixelsPerUnit(ppu)` (logical pixels per world unit, so the scale holds as the view resizes).
+  Frame with `zoom`/`size`, not by moving the eye. `near` may be negative (isometric scenes that
+  extend behind the eye).
+- Custom projections: implement `CameraProjection`. The renderer reads perspective versus
+  orthographic from the matrix, so effects follow.
 - Node-driven: `CameraComponent({CameraProjection? projection, activateOnMount = false})` ->
   `toCamera()` gives a `NodeCamera`. Camera node must not be scaled.
 - Interactive cameras: `CameraController` components attached to the camera node. `OrbitCameraController`
   (turntable around `target`; `orbitBy`/`dollyBy`/`panBy`/`frame`), `FlyCameraController` (WASD + drag
-  free flight; `moveVertical: false` = grounded first-person; `look`), `FollowCameraController`
+  free flight; `moveVertical: false` = grounded first-person; `look`, `setMoveInput`), `FollowCameraController`
   (third-person easing behind `followTarget` node; `orbitBy`/`dollyBy`). All ease with frame-rate
   independent `smoothing` (settle seconds), clamp pitch short of vertical, and write the node via
   `lookAtFrom`. Wire input with the `CameraControls({required controller, enabled, autofocus, child})`
@@ -89,6 +99,15 @@ material)`; `Mesh.clone()` (shallow, shares geometry+material); `Mesh.localBound
 `update(double deltaSeconds)` (NOT `onUpdate`), `fixedUpdate(double)`, `onUnmount`, `onDetach`,
 `cloneFor(Node)`. Node side: `addComponent`, `removeComponent`, `getComponent<T>()`,
 `getComponents<T>()`.
+Game input lives in the separate `flutter_scene_input` package: `InputSystem`, `PlayerInput`
+(`button`, `axis`, `vector`, `delta`, `fixed`, `contexts`, `overrides`), `ActionSet`, typed actions,
+binding nodes (`ButtonBinding`, `DpadBinding`, `StickBinding`, `DeltaBinding`, `ChordBinding`,
+`GatedBinding`), processors (`Deadzone`, `Scale`, `Invert`, `PerSecond`), `scene.attachInput`,
+`InputListener`, `PointerLock`, `DefaultActions`, drivers, `listenForBinding`, `bindingDisplay`.
+
+Components tick root-first in tree order. For code that must run before every component each frame
+(sampling input, applying network state), subclass `SceneTickListener` (`beforeTick(dt)`,
+`beforeFixedStep(fixedDt)`, both optional) and register it with `scene.addTickListener`.
 
 | Component | Constructor/notes |
 | --- | --- |
@@ -433,7 +452,23 @@ Widgets:
 
 `CustomRenderPass`, `RenderInput`, `RenderPassContext`, `RenderStage`, `TransientWriter`,
 `NodeFilter`, `HighlightStyle`, render-graph capture types (`CapturedPass`, `CapturedResource`,
-`RenderGraphCaptureRequest`, `RenderGraphCaptureResult`) are all exported.
+`CapturedDraw`, `CapturedSkip`, `RenderGraphCaptureRequest`, `RenderGraphCaptureResult`) are all
+exported.
+
+Debugging and profiling (all exported, all on every backend):
+- `scene.renderStats.latest` (`RenderFrameStats`): per-frame counters (draws, instances, vertices,
+  culled, batches, pipeline binds and builds) per view and per pass with CPU micros, plus
+  `history`. Always on; GPU times are null until the engine exposes timestamp queries. Each pass
+  also emits a `dart:developer` timeline event, so DevTools shows the frame.
+- `Scene.debugAllowRenderGraphCapture = true` then `scene.captureRenderGraph()` captures one frame:
+  passes with data flow and thumbnails, and every draw (`pass.draws`) with node path, material,
+  shader names, pipeline id, counts, batch size, `batchBreak` reason, and the uniform blocks bound
+  for it (`block.decode(draw)` names the members once `ShaderReflection.loadAll()` has run).
+  `result.toJson()` / `RenderGraphCaptureResult.fromJson` round-trip a capture as JSON.
+- `ShaderReflection.loadAll()` parses every loaded shader bundle; `ShaderReflection.infoFor(shader)`
+  gives inputs, uniform block layouts, texture bindings, and `sourceOf(shader)` the compiled MSL,
+  GLSL, or SPIR-V for any backend the bundle holds. `FmatCompileException.diagnostics` parses
+  compiler errors with line numbers; `shaderSourceWindow` renders the marked source around one.
 
 ---
 
@@ -482,3 +517,7 @@ Animation (`Animation`, `AnimationClip`, `AnimationPlayer` exported):
 The engine-agnostic scene-document core is a separate package `scene` (0.2.0), re-exported through
 `package:flutter_scene/fscene.dart`. `flutter_scene_importer` and `flutter_gpu_shim` no longer exist
 (folded in). Physics and audio are separate barrels (`physics.dart`, `audio.dart`).
+
+## Debugging the surface
+
+`Scene.debug` (a `SceneDebugSettings`): `view` is a `DebugView` over a `SurfaceDebugChannel` (geometry attributes, resolved surface channels, physical fields, object and material identity colors, validation flags, a `custom` channel fed by `material.debug` in a `.fmat`), with `gain`, a scalar range, and a `DebugRangePolicy`; `split` compares the view against the lit image; `overlays` holds `DebugOverlay.wireframe`. `Node.debugView` overrides or excludes a subtree. `DebugViewRegistry` lists every view by id for tools, and `Scene.debugViewId` selects one by id. Raw `ShaderMaterial`s opt in with `debugViews: true` after including `material_debug.glsl`; those that do not are drawn by a fallback that stripes the material channels.

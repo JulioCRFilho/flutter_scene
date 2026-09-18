@@ -7,6 +7,9 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_scene/noise.dart';
 import 'package:flutter_scene/scene.dart';
+// ignore: implementation_imports
+import 'package:flutter_scene/src/render/frame_transients.dart'
+    show rendererSubmissions;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:smoke_render/smoke_scenes.dart';
@@ -87,11 +90,22 @@ void main() {
           smokeSceneKey.currentContext!.findRenderObject()
               as RenderRepaintBoundary;
 
+      // The build above painted the first frame; let it finish so no pump
+      // below is paced and every one renders.
+      await _settleGpu();
+      final scene = tester
+          .state<SmokeSceneViewState>(find.byType(SmokeSceneView))
+          .scene;
+      var paced = false;
       for (var i = 0; i < settleFrames; i++) {
-        if (i > 0) boundary.markNeedsPaint();
-        await tester.pump(settleStep);
-        await Future<void>.delayed(const Duration(milliseconds: 50));
+        paced = await _pumpSettled(
+          tester,
+          scene,
+          settleStep,
+          markNeedsPaint: i > 0 ? boundary.markNeedsPaint : null,
+        );
       }
+      await _capturableFrame(tester, scene, settleStep, paced, boundary);
 
       final ui.Image image = await boundary.toImage(pixelRatio: 1.0);
       final png = (await image.toByteData(format: ui.ImageByteFormat.png))!;
@@ -107,11 +121,15 @@ void main() {
       // ignore: avoid_print
       print(
         'SMOKE ${smoke.id}: ${image.width}x${image.height} '
+        'paced=${scene.pacedFrameCount} '
+        'settleMaxMs=$_settleMaxMs settleTimeouts=$_settleTimeouts '
+        'repumps=$_repumps '
         'cornersClear=${stats.cornersClear} '
         'centerCoverage=${stats.centerNonClearFraction.toStringAsFixed(3)} '
         'fgLuma=${stats.foregroundMeanLuma.toStringAsFixed(1)} '
         'colors=${stats.distinctColors}',
       );
+      _settleMaxMs = _settleTimeouts = _repumps = 0;
 
       // Reference-free render-sanity checks (catch black screen / nothing /
       // unlit). The visual diff service catches subtler "renders, but changed".
@@ -295,10 +313,23 @@ void main() {
         ),
       ),
     );
+    await _settleGpu();
+    final scene = setup.scene;
+    var paced = false;
     for (var i = 0; i < 20; i++) {
-      await tester.pump(const Duration(milliseconds: 50));
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+      paced = await _pumpSettled(
+        tester,
+        scene,
+        const Duration(milliseconds: 50),
+      );
     }
+    await _capturableFrame(
+      tester,
+      scene,
+      const Duration(milliseconds: 50),
+      paced,
+      null,
+    );
 
     final boundary =
         boundaryKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
@@ -489,6 +520,93 @@ void main() {
     }
   });
 
+  testWidgets('depth test survives switching MSAA off', (tester) async {
+    // Regression probe for a color target reused as an MSAA resolve
+    // destination and then as a direct target with a depth attachment. The
+    // GLES backend caches one framebuffer per color texture, so without a
+    // separate pooled texture per attachment setup the second frame draws
+    // with no depth buffer at all.
+    final msaaSupported = Scene.isAntiAliasingModeSupported(
+      AntiAliasingMode.msaa,
+    );
+    debugPrint('SMOKE depth_pairing: msaaSupported=$msaaSupported');
+    if (!msaaSupported) return;
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: Scaffold(backgroundColor: kSmokeClear, body: SizedBox.expand()),
+      ),
+    );
+    await tester.pump();
+    await Scene.initializeStaticResources();
+
+    final setup = buildDepthPairingScene();
+    final scene = setup.scene..antiAliasingMode = AntiAliasingMode.msaa;
+    final boundaryKey = GlobalKey();
+    await tester.pumpWidget(
+      MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: Scaffold(
+          backgroundColor: kSmokeClear,
+          body: Center(
+            child: RepaintBoundary(
+              key: boundaryKey,
+              child: SizedBox(
+                width: kSmokeSize.toDouble(),
+                height: kSmokeSize.toDouble(),
+                child: SceneView(scene, camera: setup.camera),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    Future<void> pumpFrames() async {
+      await _settleGpu();
+      var paced = false;
+      for (var i = 0; i < 10; i++) {
+        paced = await _pumpSettled(
+          tester,
+          scene,
+          const Duration(milliseconds: 50),
+        );
+      }
+      await _capturableFrame(
+        tester,
+        scene,
+        const Duration(milliseconds: 50),
+        paced,
+        null,
+      );
+    }
+
+    Future<(int, int, int)> centerPixel() async {
+      final boundary =
+          boundaryKey.currentContext!.findRenderObject()
+              as RenderRepaintBoundary;
+      final ui.Image image = await boundary.toImage(pixelRatio: 1.0);
+      final rgba = (await image.toByteData(
+        format: ui.ImageByteFormat.rawRgba,
+      ))!;
+      final o = ((image.height ~/ 2) * image.width + image.width ~/ 2) * 4;
+      return (rgba.getUint8(o), rgba.getUint8(o + 1), rgba.getUint8(o + 2));
+    }
+
+    await pumpFrames();
+    final msaa = await centerPixel();
+    expect(msaa.$1, greaterThan(200), reason: 'msaa frame center $msaa');
+    expect(msaa.$2, lessThan(60), reason: 'msaa frame center $msaa');
+
+    scene.antiAliasingMode = AntiAliasingMode.none;
+    await pumpFrames();
+    final none = await centerPixel();
+    debugPrint('SMOKE depth_pairing: msaa=$msaa none=$none');
+    expect(none.$1, greaterThan(200), reason: 'no-AA frame center $none');
+    expect(none.$2, lessThan(60), reason: 'no-AA frame center $none');
+  });
+
   tearDownAll(() {
     binding.reportData = <String, dynamic>{...captures};
   });
@@ -545,3 +663,62 @@ _frameStats(ByteData rgba, int w, int h) {
     distinctColors: colors.length,
   );
 }
+
+/// Waits for the GPU to finish the frame the last pump submitted, so the next
+/// pump renders instead of re-presenting under `Scene.maxGpuFramesInFlight`
+/// and the capture is the frame the last pump drew. Bounded, since the
+/// immediate-execution web shim never holds work.
+Future<void> _settleGpu() async {
+  final start = DateTime.now();
+  final deadline = start.add(const Duration(seconds: 10));
+  while (rendererSubmissions.framesInFlight > 0 &&
+      DateTime.now().isBefore(deadline)) {
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+  final waited = DateTime.now().difference(start).inMilliseconds;
+  if (waited > _settleMaxMs) _settleMaxMs = waited;
+  if (rendererSubmissions.framesInFlight > 0) _settleTimeouts++;
+  await Future<void>.delayed(const Duration(milliseconds: 50));
+}
+
+/// Pumps one frame and lets its GPU work finish. Returns whether the frame
+/// was paced (re-presented) rather than rendered.
+Future<bool> _pumpSettled(
+  WidgetTester tester,
+  Scene scene,
+  Duration step, {
+  void Function()? markNeedsPaint,
+}) async {
+  markNeedsPaint?.call();
+  final pacedBefore = scene.pacedFrameCount;
+  await tester.pump(step);
+  await _settleGpu();
+  return scene.pacedFrameCount != pacedBefore;
+}
+
+/// Makes sure the frame on screen is a rendered one. The Android emulator's
+/// Vulkan host signals some fences only when the next frame presents, so a
+/// pump right after such a frame is paced no matter how long the wait; pump
+/// again until one renders, bounded.
+Future<void> _capturableFrame(
+  WidgetTester tester,
+  Scene scene,
+  Duration step,
+  bool lastPaced,
+  RenderRepaintBoundary? boundary,
+) async {
+  for (var tries = 0; lastPaced && tries < 4; tries++) {
+    _repumps++;
+    lastPaced = await _pumpSettled(
+      tester,
+      scene,
+      step,
+      markNeedsPaint: boundary?.markNeedsPaint,
+    );
+  }
+}
+
+// Per-scene diagnostics of the GPU waits, printed with the frame stats.
+int _settleMaxMs = 0;
+int _settleTimeouts = 0;
+int _repumps = 0;

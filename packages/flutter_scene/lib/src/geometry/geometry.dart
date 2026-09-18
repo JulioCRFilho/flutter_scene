@@ -17,12 +17,18 @@ import 'package:flutter_scene/src/render/frame_transients.dart';
 /// Packs immutable mesh uploads into shared GPU buffers.
 ///
 /// Pass one arena to many `MeshGeometry` objects to avoid one GPU allocation
-/// per mesh. The arena uses fixed-size bump-allocated blocks, while uploads
-/// larger than [blockSizeInBytes] receive a dedicated block. Geometry buffer
-/// views retain their blocks, so the arena itself need not outlive the meshes.
+/// per mesh. Uploads are bump-allocated into fixed-size blocks, filling the
+/// first block with room, while uploads larger than [blockSizeInBytes]
+/// receive a dedicated block. Geometry buffer views retain their blocks, so
+/// the arena itself need not outlive the meshes.
 ///
-/// This is intended for geometry loaded or generated in batches. Updatable
-/// geometry owns its ring buffers and cannot use an arena.
+/// The arena never reclaims space. An allocation stays reserved for as long
+/// as the arena is alive, whether or not the geometry that used it still
+/// exists, so an arena only ever grows. Use it for geometry loaded or
+/// generated in batches with a lifetime the arena can share (a level, a
+/// screen), and drop the arena with them. Geometry rebuilt every frame
+/// belongs in `GeometryStorage.updatable`, which reuses its buffers in
+/// place; an updatable geometry cannot use an arena.
 /// {@category Geometry}
 class GeometryBufferArena {
   /// Creates an arena with the given minimum block size.
@@ -55,11 +61,14 @@ class GeometryBufferArena {
   gpu.BufferView _allocate(int sizeInBytes) {
     assert(sizeInBytes > 0);
     final alignedSize = (sizeInBytes + 15) & ~15;
+    // First fit over every block, so a block's tail is not abandoned the
+    // first time an upload does not fit in it.
     _GeometryBufferBlock? block;
-    if (_blocks.isNotEmpty &&
-        _blocks.last.usedInBytes + alignedSize <=
-            _blocks.last.buffer.sizeInBytes) {
-      block = _blocks.last;
+    for (final candidate in _blocks) {
+      if (candidate.usedInBytes + alignedSize <= candidate.buffer.sizeInBytes) {
+        block = candidate;
+        break;
+      }
     }
     if (block == null) {
       final capacity = alignedSize > blockSizeInBytes
@@ -342,6 +351,7 @@ abstract class Geometry {
   void setIndices(gpu.BufferView indices, gpu.IndexType indexType) {
     _indices = indices;
     _indexType = indexType;
+    _debugEdges = null;
     switch (indexType) {
       case gpu.IndexType.int16:
         _indexCount = indices.lengthInBytes ~/ 2;
@@ -353,6 +363,60 @@ abstract class Geometry {
   /// The index type (int16 or int32) of the bound index buffer.
   @internal
   gpu.IndexType get indexType => _indexType;
+
+  /// Whether this geometry's vertex shader writes the engine's standard
+  /// varyings (`material_varyings.glsl`), which the surface debug views and
+  /// their fallback shader read. Mesh geometry does; a geometry with its own
+  /// fragment contract (billboards, splats) does not and is left out of the
+  /// views.
+  @internal
+  bool get emitsStandardVaryings => true;
+
+  ({gpu.BufferView view, gpu.IndexType type, int count})? _debugEdges;
+  bool _debugEdgesUnavailable = false;
+
+  /// A line-list index buffer of this geometry's unique triangle edges,
+  /// built from the retained CPU indices on first use and cached until the
+  /// indices change. Null when the geometry is not a triangle list or keeps
+  /// no CPU data. Drawn by the wireframe overlay with the geometry's own
+  /// vertex streams and shader, so every vertex path (skinning, morphing,
+  /// instancing, a material's vertex block) holds.
+  @internal
+  ({gpu.BufferView view, gpu.IndexType type, int count})? get debugEdges {
+    final cached = _debugEdges;
+    if (cached != null) return cached;
+    if (_debugEdgesUnavailable) return null;
+    final built = _buildDebugEdges();
+    if (built == null) {
+      _debugEdgesUnavailable = true;
+      return null;
+    }
+    return _debugEdges = built;
+  }
+
+  ({gpu.BufferView view, gpu.IndexType type, int count})? _buildDebugEdges() {
+    if (primitiveType != gpu.PrimitiveType.triangle) return null;
+    if (_vertexCount == 0) return null;
+    final indices = _cpuIndices;
+    if (_indices != null && indices == null) return null;
+    final edges = debugEdgeIndices(
+      indices,
+      _indexType,
+      _indexCount,
+      _vertexCount,
+    );
+    if (edges.count == 0) return null;
+    final buffer = gpu.gpuContext.createDeviceBufferWithCopy(edges.bytes);
+    return (
+      view: gpu.BufferView(
+        buffer,
+        offsetInBytes: 0,
+        lengthInBytes: edges.bytes.lengthInBytes,
+      ),
+      type: edges.type,
+      count: edges.count,
+    );
+  }
 
   /// Allocates a [gpu.DeviceBuffer] and uploads [vertices] (and optional
   /// [indices]) into it in one step.
@@ -1662,3 +1726,58 @@ const VertexBufferDescriptor kSkinnedVertexBuffer = VertexBufferDescriptor(
     ),
   ],
 );
+
+/// The unique edges of a triangle list as a line-list index buffer.
+///
+/// [indices] is the triangle index data (null for a non-indexed list of
+/// [vertexCount] vertices), read as [indexType]. Edges are deduplicated by
+/// their unordered vertex pair, so a shared edge draws once. The result uses
+/// 16-bit indices when every vertex fits, 32-bit otherwise.
+@visibleForTesting
+({ByteData bytes, gpu.IndexType type, int count}) debugEdgeIndices(
+  ByteData? indices,
+  gpu.IndexType indexType,
+  int indexCount,
+  int vertexCount,
+) {
+  final triangleIndexCount = indices == null ? vertexCount : indexCount;
+  final triangles = triangleIndexCount ~/ 3;
+  int readIndex(int i) {
+    if (indices == null) return i;
+    return indexType == gpu.IndexType.int16
+        ? indices.getUint16(i * 2, Endian.little)
+        : indices.getUint32(i * 4, Endian.little);
+  }
+
+  // Keyed on the ordered pair; vertexCount is well under the 2^26 that keeps
+  // the product inside a double's exact integer range on the web.
+  final seen = <int>{};
+  final edges = <int>[];
+  void addEdge(int a, int b) {
+    final lo = a < b ? a : b;
+    final hi = a < b ? b : a;
+    if (seen.add(lo * vertexCount + hi)) {
+      edges.add(lo);
+      edges.add(hi);
+    }
+  }
+
+  for (var t = 0; t < triangles; t++) {
+    final a = readIndex(t * 3);
+    final b = readIndex(t * 3 + 1);
+    final c = readIndex(t * 3 + 2);
+    if (a == b || b == c || a == c) continue;
+    addEdge(a, b);
+    addEdge(b, c);
+    addEdge(c, a);
+  }
+  final wide = vertexCount > 0xFFFF;
+  final bytes = wide
+      ? ByteData.sublistView(Uint32List.fromList(edges))
+      : ByteData.sublistView(Uint16List.fromList(edges));
+  return (
+    bytes: bytes,
+    type: wide ? gpu.IndexType.int32 : gpu.IndexType.int16,
+    count: edges.length,
+  );
+}

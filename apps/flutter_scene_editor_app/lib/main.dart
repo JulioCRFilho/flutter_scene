@@ -11,7 +11,7 @@ import 'dart:isolate';
 import 'dart:ui' show AppExitResponse;
 
 import 'package:file_selector/file_selector.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/src/foundation/_features.dart' show isWindowingEnabled;
 import 'package:flutter/src/widgets/_window.dart';
@@ -1500,6 +1500,12 @@ class _EditorHomeState extends State<_EditorHome> {
           renderGraphImage: _renderGraphMcp.passOutput,
           renderGraphPixel: _renderGraphMcp.readPixel,
           renderGraphScan: _renderGraphMcp.scanForNans,
+          readRenderStats: _renderGraphMcp.renderStats,
+          listDraws: _renderGraphMcp.listDraws,
+          readDraw: _renderGraphMcp.readDraw,
+          listShaders: _renderGraphMcp.listShaders,
+          readShaderInfo: _renderGraphMcp.shaderInfo,
+          saveRenderCapture: _renderGraphMcp.saveCapture,
           listDebugModes: _renderGraphMcp.listModes,
           setDebugMode: _renderGraphMcp.setMode,
           animationPreview: ({animationId, playing, loop, speed, seek, stop}) {

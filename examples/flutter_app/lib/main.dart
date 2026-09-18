@@ -11,6 +11,7 @@ import 'package:flutter_scene/scene.dart'
         IrradianceVolumeMode,
         SsrDebugView,
         ToneMappingMode,
+        RenderQualityTier,
         Scene,
         PostInsertion,
         ShadowCasterFaces,
@@ -29,6 +30,7 @@ import 'example_audio.dart';
 import 'example_auto_exposure.dart';
 import 'example_cloth.dart';
 import 'example_configurator.dart';
+import 'example_dice_shadows.dart';
 import 'example_dicom.dart';
 import 'example_kit.dart';
 import 'example_lights.dart';
@@ -62,6 +64,7 @@ import 'example_widget_inset.dart';
 import 'example_widget_texture.dart';
 import 'example_split_screen.dart';
 import 'example_stress_tests.dart';
+import 'example_debug_views.dart';
 import 'example_raw_shader.dart';
 import 'example_toon.dart';
 import 'example_toon_fmat.dart';
@@ -258,6 +261,7 @@ class _MyAppState extends State<MyApp> {
       'Navigation Route': (context) => const ExampleNavRoute(),
       'Toon': (context) => const ExampleToon(),
       'Raw shader': (context) => const ExampleRawShader(),
+      'Debug views': (context) => const ExampleDebugViews(),
       'Toon (.fmat)': (context) => const ExampleToonFmat(),
       'Custom vertices (.fmat)': (context) => const ExampleVertexCurve(),
       'Materialize (.fmat)': (context) => const ExampleMaterialize(),
@@ -301,6 +305,16 @@ class _MyAppState extends State<MyApp> {
             return const Center(child: CircularProgressIndicator());
           }
           return const ExamplePhysicsCar();
+        },
+      ),
+      'Dice Shadows': (context) => FutureBuilder<void>(
+        // Shares the Rapier backend with the Physics example.
+        future: _physicsReady,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState != ConnectionState.done) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          return const ExampleDiceShadows();
         },
       ),
       'Shapes': (context) => FutureBuilder<void>(
@@ -621,6 +635,44 @@ class _SettingsSidebarState extends State<_SettingsSidebar> {
               'MSAA is unavailable on this backend; msaa and auto render '
               'with FXAA.',
             ),
+          ),
+        Row(
+          children: [
+            const Text('Quality'),
+            const Spacer(),
+            DropdownButton<RenderQualityTier?>(
+              value: exampleSettings.renderQualityTier,
+              onChanged: (value) {
+                setState(() => exampleSettings.renderQualityTier = value);
+              },
+              items: [
+                const DropdownMenuItem<RenderQualityTier?>(
+                  value: null,
+                  child: Text('auto'),
+                ),
+                for (final tier in RenderQualityTier.values)
+                  DropdownMenuItem<RenderQualityTier?>(
+                    value: tier,
+                    child: Text(tier.name),
+                  ),
+              ],
+            ),
+          ],
+        ),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Adaptive quality'),
+          value: exampleSettings.adaptiveQuality,
+          onChanged: (value) =>
+              setState(() => exampleSettings.adaptiveQuality = value),
+        ),
+        if (exampleSettings.adaptiveQuality)
+          _slider(
+            'Target fps',
+            exampleSettings.adaptiveTargetFrameRate,
+            24,
+            120,
+            (v) => exampleSettings.adaptiveTargetFrameRate = v.roundToDouble(),
           ),
         Row(
           children: [

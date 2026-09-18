@@ -3,7 +3,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart'
-    show debugPrint, kDebugMode, visibleForTesting;
+    show debugPrint, internal, kDebugMode, visibleForTesting;
 import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
 import 'package:vector_math/vector_math.dart';
 
@@ -16,13 +16,18 @@ import 'package:flutter_scene/src/fmat/material_registry.dart'
 import 'package:flutter_scene/src/material/instance_attributes.dart';
 import 'package:flutter_scene/src/material/material.dart';
 import 'package:flutter_scene/src/material/engine_lighting.dart';
+import 'package:flutter_scene/src/render/projection_params.dart';
 import 'package:flutter_scene/src/render/custom_render_pass.dart';
+import 'package:flutter_scene/src/render/debug_view.dart';
+import 'package:flutter_scene/src/render/draw_recorder.dart';
 import 'package:flutter_scene/src/render/instance_packing.dart';
 import 'package:flutter_scene/src/render/lod.dart';
 import 'package:flutter_scene/src/render/render_scene.dart';
 import 'package:flutter_scene/src/render/render_profile.dart';
+import 'package:flutter_scene/src/render/render_stats.dart';
 import 'package:flutter_scene/src/render/frame_transients.dart';
 import 'package:flutter_scene/src/render/instance_batching.dart';
+import 'package:flutter_scene/src/shaders.dart';
 
 /// A deferred opaque draw. Holds the [RenderItem] (instanced or not), its
 /// resolved pipeline, a per-pipeline grouping key, and the camera
@@ -199,7 +204,9 @@ base class _TranslucentRecord {
 const int _transmissionCoverageColumns = 32;
 const int _transmissionCoverageRows = 32;
 
-/// Maximum accumulated scene-color batches emitted in one frame.
+/// Maximum accumulated scene-color batches emitted in one frame, and the
+/// default and upper bound of `Scene.sceneColorCaptureBatches`.
+/// {@category Rendering}
 const int maxSceneColorCaptureBatches = 8;
 
 base class _ScreenCoverage {
@@ -378,6 +385,9 @@ final Map<(gpu.Shader, gpu.Shader, int), gpu.RenderPipeline> _pipelineCache =
 /// until restart.
 final Set<(gpu.Shader, gpu.Shader, int)> _rejectedPipelines = {};
 
+/// Pipelines currently held in the process-wide cache.
+int get pipelineCacheSize => _pipelineCache.length;
+
 /// Returns the cached render pipeline for ([vertexShader], [fragmentShader],
 /// [vertexLayout]), building and caching it on first use.
 ///
@@ -393,6 +403,7 @@ gpu.RenderPipeline resolvePipeline(
   final key = (vertexShader, fragmentShader, vertexLayoutId(vertexLayout));
   final cached = _pipelineCache[key];
   if (cached != null) return cached;
+  activeRenderCounters.pipelineBuilds++;
   final stopwatch = kDebugMode || profileRendering
       ? (Stopwatch()..start())
       : null;
@@ -518,15 +529,17 @@ base class SceneEncoder {
     this._cullingPlanes,
     this._cullInstances, {
     Matrix4? cameraTransform,
+    DebugViewFrame? debugView,
   }) : _renderPass = renderPass,
-       _transientsBuffer = transientsBuffer {
+       _transientsBuffer = transientsBuffer,
+       _debugView = debugView {
     currentSceneEncoderViewport = _dimensions;
     _cameraTransform = cameraTransform ?? _camera.getViewTransform(_dimensions);
     frustum = Frustum.matrix(_cameraTransform);
-    // The screen-size LOD metric is perspective-specific; with any other
-    // projection LOD nodes draw their highest-detail level.
-    final camera = _camera;
-    _lodFovRadiansY = camera is PerspectiveCamera ? camera.fovRadiansY : null;
+    // A degenerate projection has no screen-size metric, so LOD nodes draw
+    // their highest-detail level.
+    final projection = ProjectionParams.of(_camera.projection, _dimensions);
+    _lodProjection = projection.scaleY > 0.0 ? projection : null;
 
     // Begin the opaque phase.
     _renderPass.setDepthWriteEnable(true);
@@ -538,15 +551,27 @@ base class SceneEncoder {
   final ui.Size _dimensions;
   final Lighting _lighting;
   final int _layerMask;
+  // The frame's surface debug view state, or null when none is active.
+  final DebugViewFrame? _debugView;
+  // The DebugViewInfo block for one draw, and the shared block that turns
+  // the view off, emplaced once per encoder on first use.
+  final Float32List _debugViewScratch = Float32List(DebugViewFrame.floatCount);
+  gpu.BufferView? _debugViewInactive;
+  // Which material the inactive block is bound for, so a run of draws with
+  // one material binds it once.
+  Material? _debugViewBoundMaterial;
+  bool _debugViewBoundFallback = false;
+  static final gpu.Shader _debugFallbackShader =
+      baseShaderLibrary['DebugSurfaceFragment']!;
   final List<Plane> _cullingPlanes;
   final bool _cullInstances;
   // Not final because opaque and translucent draws can use separate passes.
   gpu.RenderPass _renderPass;
   final TransientWriter _transientsBuffer;
   late final Matrix4 _cameraTransform;
-  // The camera's vertical field of view in radians, or null for a
-  // non-perspective camera (which disables screen-size LOD).
-  late final double? _lodFovRadiansY;
+  // The projection terms for screen-size LOD, or null for a degenerate
+  // projection (which disables it).
+  late final ProjectionParams? _lodProjection;
   final List<_OpaqueRecord> _opaqueRecords = [];
   final List<_TranslucentRecord> _translucentRecords = [];
   static final List<_OpaqueRecord> _opaqueRecordPool = [];
@@ -562,12 +587,17 @@ base class SceneEncoder {
   /// the start of this frame. Used by [submit] for per-item culling.
   late final Frustum frustum;
 
+  /// The view-projection this encoder draws with.
+  @internal
+  Matrix4 get cameraTransform => _cameraTransform;
+
   // The pipeline currently bound on the render pass, or null before the
   // first bind. `clearBindings` does not clear the pipeline, so a draw
   // that reuses it can skip the rebind. Opaque draws are pipeline-sorted,
   // so reuse runs are common.
   gpu.RenderPipeline? _boundPipeline;
   Material? _boundMaterial;
+  bool _boundMaterialFallback = false;
   gpu.Shader? _boundMaterialVertex;
   gpu.Shader? _boundFrameInfoShader;
   double _boundFrameInfoDepthBias = double.nan;
@@ -579,6 +609,7 @@ base class SceneEncoder {
   gpu.PrimitiveType? _boundPrimitiveType;
   int _encodedDraws = 0;
   int _encodedInstances = 0;
+  DrawPhase _phase = DrawPhase.opaque;
 
   /// Queues a draw call for [item], unless it is hidden or frustum
   /// culled.
@@ -588,9 +619,18 @@ base class SceneEncoder {
   /// instance so each can be depth-sorted independently.
   void submit(RenderItem item) {
     if (!item.drawsColor) return;
-    if ((item.layers & _layerMask) == 0) return;
+    activeRenderCounters.submitted++;
+    if ((item.layers & _layerMask) == 0) {
+      activeRenderCounters.layerMasked++;
+      activeDrawRecorder?.onSkip(item, DrawSkipReason.layerMasked);
+      return;
+    }
     if (_cullInstances) {
-      if (!item.cullVisibleInstances(frustum, _cullingPlanes)) return;
+      if (!item.cullVisibleInstances(frustum, _cullingPlanes)) {
+        activeRenderCounters.culled++;
+        activeDrawRecorder?.onSkip(item, DrawSkipReason.frustumCulled);
+        return;
+      }
     } else {
       item.visibleInstanceIndices = null;
     }
@@ -603,7 +643,11 @@ base class SceneEncoder {
     // Queue the level(s) of detail to draw (or cull). A cross-fading node
     // returns its two adjacent levels with complementary dither coverage.
     if (lod != null) {
-      for (final selection in _resolveLod(lod, worldBounds)) {
+      final selections = _resolveLod(lod, worldBounds);
+      if (selections.isEmpty) {
+        activeDrawRecorder?.onSkip(item, DrawSkipReason.lodCulled);
+      }
+      for (final selection in selections) {
         final level = lod.levels[selection.level];
         _record(item, level.geometry, level.material, selection.fade);
       }
@@ -622,10 +666,15 @@ base class SceneEncoder {
   ) {
     // A material with a `vertex { }` block supplies its own vertex shader for
     // this geometry's mesh type; otherwise the engine's standard one is used.
+    // A material that cannot show the active debug view draws through the
+    // engine's fallback debug fragment shader instead of its own.
+    final fallback = _usesDebugFallback(item, material, geometry);
     final pipeline = tryResolvePipeline(
       material.materialVertexShader(geometry.materialVertexVariant) ??
           geometry.vertexShader,
-      material.fragmentShaderForLighting(_lighting),
+      fallback
+          ? _debugFallbackShader
+          : material.fragmentShaderForLighting(_lighting),
       // A material declaring `instance_attributes` widens the instance-rate
       // slot, so the pipeline depends on the material as well as the geometry.
       vertexLayout: geometry.instancedVertexLayoutFor(
@@ -636,7 +685,11 @@ base class SceneEncoder {
           '${geometry.runtimeType}'
           '${geometry.hasCustomAttributes ? ' with custom vertex attributes' : ''}',
     );
-    if (pipeline == null) return;
+    if (pipeline == null) {
+      activeRenderCounters.pipelineRejected++;
+      activeDrawRecorder?.onSkip(item, DrawSkipReason.pipelineRejected);
+      return;
+    }
 
     if (material.isOpaque()) {
       _opaqueRecords.add(
@@ -783,25 +836,30 @@ base class SceneEncoder {
 
   // The level(s) of detail to draw for [lod] from the item's [worldBounds],
   // each with a fade coverage; empty to cull. Falls back to the highest detail
-  // when no screen-size metric is available (no bounds, or a non-perspective
-  // camera).
+  // when no screen-size metric is available (no bounds, or a degenerate
+  // projection).
   List<({int level, double fade})> _resolveLod(
     LodSelection lod,
     Aabb3? worldBounds,
   ) {
-    final fovRadiansY = _lodFovRadiansY;
-    if (worldBounds == null || fovRadiansY == null) {
+    final projection = _lodProjection;
+    if (worldBounds == null || projection == null) {
       return const [(level: 0, fade: 1.0)];
     }
     // The circumscribed sphere of the world AABB (conservative, so detail is
     // kept slightly longer than a tight sphere would).
     final radius = worldBounds.max.distanceTo(worldBounds.min) * 0.5;
-    final size = lodScreenSize(
-      center: worldBounds.center,
-      radius: radius,
-      cameraPosition: _camera.position,
-      fovRadiansY: fovRadiansY,
-    );
+    final size = projection.orthographic
+        ? lodScreenSizeOrthographic(
+            radius: radius,
+            halfHeight: projection.scaleY,
+          )
+        : lodScreenSize(
+            center: worldBounds.center,
+            radius: radius,
+            cameraPosition: _camera.position,
+            fovRadiansY: 2.0 * math.atan(projection.scaleY),
+          );
     return lod.resolve(size);
   }
 
@@ -827,6 +885,7 @@ base class SceneEncoder {
   // pipeline only need to bind it once.
   void _bindPipeline(gpu.RenderPipeline pipeline) {
     if (identical(_boundPipeline, pipeline)) return;
+    activeRenderCounters.pipelineBinds++;
     _renderPass.bindPipeline(pipeline);
     _boundPipeline = pipeline;
   }
@@ -839,6 +898,7 @@ base class SceneEncoder {
     _renderPass.clearBindings();
     EngineLightingUniforms.invalidateBindMemo();
     _boundMaterial = null;
+    _debugViewBoundMaterial = null;
     _boundMaterialVertex = null;
     _boundFrameInfoShader = null;
     _boundFrameInfoDepthBias = double.nan;
@@ -850,16 +910,90 @@ base class SceneEncoder {
     _boundPrimitiveType = null;
   }
 
+  // The debug view [item] shows this frame: its node override when one is
+  // set, else the scene view, else none.
+  DebugView _effectiveDebugView(RenderItem? item) {
+    final frame = _debugView;
+    if (frame == null) return DebugView.none;
+    return frame.effectiveView(item?.debugView);
+  }
+
+  // Whether [material] draws through the engine's fallback debug shader for
+  // [item]: a view is active for it, the material cannot show views itself,
+  // and the geometry writes the standard varyings the fallback reads.
+  bool _usesDebugFallback(
+    RenderItem? item,
+    Material material,
+    Geometry geometry,
+  ) {
+    if (_debugView == null) return false;
+    return _effectiveDebugView(item).isActive &&
+        !material.participatesInDebugViews &&
+        geometry.emitsStandardVaryings;
+  }
+
+  // Binds the DebugViewInfo block for the draw about to be recorded. Every
+  // participating shader declares it, so it is bound even when no view is
+  // active (once per material run, the shared off block); an active view
+  // binds per draw, since the identity seeds are per item.
+  void _bindDebugView(Material material, RenderItem? item, bool fallback) {
+    if (!fallback && !material.participatesInDebugViews) return;
+    final shader = fallback
+        ? _debugFallbackShader
+        : material.fragmentShaderForLighting(_lighting);
+    if (fallback) {
+      // The fallback replaces the material's own shader, so its bind never
+      // supplied the view block the debug hook reads.
+      EngineLightingUniforms.bindViewInfo(
+        _renderPass,
+        shader,
+        _transientsBuffer,
+        _lighting,
+      );
+    }
+    final slot = shader.getUniformSlot('DebugViewInfo');
+    final view = _effectiveDebugView(item);
+    if (!view.isActive) {
+      if (identical(_debugViewBoundMaterial, material) &&
+          _debugViewBoundFallback == fallback) {
+        return;
+      }
+      _renderPass.bindUniform(
+        slot,
+        _debugViewInactive ??= _transientsBuffer.emplace(
+          ByteData.sublistView(DebugViewFrame.inactive),
+        ),
+      );
+      _debugViewBoundMaterial = material;
+      _debugViewBoundFallback = fallback;
+      return;
+    }
+    _debugView!.pack(
+      _debugViewScratch,
+      view,
+      objectSeed: item == null ? 0 : identityHashCode(item.sourceNode ?? item),
+      materialSeed: identityHashCode(material),
+    );
+    _renderPass.bindUniform(
+      slot,
+      _transientsBuffer.emplace(ByteData.sublistView(_debugViewScratch)),
+    );
+    // A per-draw block; the next draw with this material must rebind.
+    _debugViewBoundMaterial = null;
+  }
+
   void _bindMaterial(
     Material material,
     gpu.Shader? materialVertex,
-    double fade,
-  ) {
+    double fade, {
+    bool fallback = false,
+  }) {
     final lightOffset = material.lightListOffset;
     final lightCount = material.lightListCount;
     final lightChannelMask = material.lightChannelMask;
     if (identical(_boundMaterial, material) &&
         identical(_boundMaterialVertex, materialVertex) &&
+        _boundMaterialFallback == fallback &&
         _boundMaterialFade == fade &&
         _boundMaterialLightOffset == lightOffset &&
         _boundMaterialLightCount == lightCount &&
@@ -867,11 +1001,19 @@ base class SceneEncoder {
       return;
     }
     material.lodFade = fade;
-    material.bind(_renderPass, _transientsBuffer, _lighting);
+    if (fallback) {
+      // The fallback debug shader has none of the material's fragment slots;
+      // only the pass state and the vertex stage bind.
+      _renderPass.setCullMode(material.renderCullMode);
+      _renderPass.setWindingOrder(gpu.WindingOrder.clockwise);
+    } else {
+      material.bind(_renderPass, _transientsBuffer, _lighting);
+    }
     _boundWindingOrder = null;
     if (materialVertex != null) {
       material.bindVertexStage(_renderPass, materialVertex, _transientsBuffer);
     }
+    _boundMaterialFallback = fallback;
     _boundMaterial = material;
     _boundMaterialVertex = materialVertex;
     _boundMaterialFade = fade;
@@ -945,14 +1087,45 @@ base class SceneEncoder {
     geometry.draw(_renderPass, instanceCount: instanceCount);
   }
 
+  // Tells the capture recorder what the next draws are, at the cost of one
+  // null check per encode in steady state.
+  void _describeDraw(
+    RenderItem item,
+    Geometry geometry,
+    Material material,
+    gpu.Shader? materialVertex,
+    gpu.RenderPipeline pipeline, {
+    int batchedItems = 1,
+    BatchBreakReason batchBreak = BatchBreakReason.none,
+  }) {
+    final recorder = activeDrawRecorder;
+    if (recorder == null) return;
+    recorder.setContext(
+      DrawContext(
+        phase: _phase,
+        item: item,
+        geometry: geometry,
+        material: material,
+        vertexShader: materialVertex ?? geometry.vertexShader,
+        fragmentShader: material.fragmentShaderForLighting(_lighting),
+        pipeline: pipeline,
+        batchedItems: batchedItems,
+        batchBreak: batchBreak,
+      ),
+    );
+  }
+
   void _encode(
     gpu.RenderPipeline pipeline,
     Matrix4 worldTransform,
     Geometry geometry,
     Material material,
     bool windingFlipped,
-    double fade,
-  ) {
+    double fade, {
+    RenderItem? item,
+    BatchBreakReason batchBreak = BatchBreakReason.none,
+  }) {
+    final fallback = _usesDebugFallback(item, material, geometry);
     // Bindings persist across draws within a pass, and every draw binds its
     // full slot set, so clearing is only needed when the pipeline (and with
     // it the shaders' slot layouts) changes; a stale entry from a different
@@ -972,6 +1145,16 @@ base class SceneEncoder {
     final materialVertex = material.materialVertexShader(
       geometry.materialVertexVariant,
     );
+    if (item != null) {
+      _describeDraw(
+        item,
+        geometry,
+        material,
+        materialVertex,
+        pipeline,
+        batchBreak: batchBreak,
+      );
+    }
     _bindGeometry(geometry, worldTransform, materialVertex, material.depthBias);
     if (geometry.bindsModelTransformInstance) {
       // The model matrix arrives through the instance-rate vertex buffer,
@@ -985,7 +1168,8 @@ base class SceneEncoder {
         attributeFloats: material.instanceAttributes?.floatCount ?? 0,
       );
     }
-    _bindMaterial(material, materialVertex, fade);
+    _bindMaterial(material, materialVertex, fade, fallback: fallback);
+    _bindDebugView(material, item, fallback);
     // A mirrored transform reverses triangle winding. Set both cases because
     // a cached material bind no longer resets it between compatible draws.
     _setWindingOrder(
@@ -1021,6 +1205,8 @@ base class SceneEncoder {
     Uint8List? packedWorldWindingFlipped,
     Float32List? attributeData,
     int attributeFloats = 0,
+    RenderItem? item,
+    BatchBreakReason batchBreak = BatchBreakReason.none,
   }) {
     checkInstanceRecordWidth(material.instanceAttributes, attributeFloats);
     if (!identical(_boundPipeline, pipeline)) {
@@ -1030,7 +1216,19 @@ base class SceneEncoder {
     final materialVertex = material.materialVertexShader(
       geometry.materialVertexVariant,
     );
-    _bindMaterial(material, materialVertex, fade);
+    if (item != null) {
+      _describeDraw(
+        item,
+        geometry,
+        material,
+        materialVertex,
+        pipeline,
+        batchBreak: batchBreak,
+      );
+    }
+    final fallback = _usesDebugFallback(item, material, geometry);
+    _bindMaterial(material, materialVertex, fade, fallback: fallback);
+    _bindDebugView(material, item, fallback);
     _setPrimitiveType(geometry.primitiveType);
 
     if (geometry.instancedVertexLayout == null) {
@@ -1105,8 +1303,11 @@ base class SceneEncoder {
     Geometry geometry,
     Material material,
     List<InstanceDataBatch> batches,
-    double fade,
-  ) {
+    double fade, {
+    RenderItem? item,
+    int batchedItems = 1,
+    BatchBreakReason batchBreak = BatchBreakReason.none,
+  }) {
     // Cross-node batching synthesizes instances, so a material declaring
     // per-instance attributes is kept out of it (see opaqueBatchEnd).
     assert(material.instanceAttributes == null);
@@ -1117,7 +1318,22 @@ base class SceneEncoder {
     final materialVertex = material.materialVertexShader(
       geometry.materialVertexVariant,
     );
-    _bindMaterial(material, materialVertex, fade);
+    if (item != null) {
+      _describeDraw(
+        item,
+        geometry,
+        material,
+        materialVertex,
+        pipeline,
+        batchedItems: batchedItems,
+        batchBreak: batchBreak,
+      );
+    }
+    final fallback = _usesDebugFallback(item, material, geometry);
+    _bindMaterial(material, materialVertex, fade, fallback: fallback);
+    // TODO(debug-views): a cross-node batch carries the first item's object
+    // seed, so its members share one object color.
+    _bindDebugView(material, item, fallback);
     _setPrimitiveType(geometry.primitiveType);
     _bindGeometry(
       geometry,
@@ -1165,6 +1381,7 @@ base class SceneEncoder {
   /// Emits only the opaque phase (see [flush]). Used with [flushTranslucent]
   /// when the scene pass snapshots the opaque color between them.
   void flushOpaque() {
+    _phase = DrawPhase.opaque;
     final sortWatch = profileRendering ? (Stopwatch()..start()) : null;
     _opaqueRecords.sort((a, b) {
       final byPipeline = a.pipelineKey.compareTo(b.pipelineKey);
@@ -1203,7 +1420,16 @@ base class SceneEncoder {
       item.applyMorphWeights(record.geometry);
 
       final end = opaqueBatchEnd(_opaqueRecords, index);
+      // Only a capture asks why a run ended; steady state skips the walk.
+      final batchBreak = activeDrawRecorder == null
+          ? BatchBreakReason.none
+          : opaqueBatchBreakReason(
+              _opaqueRecords[end - 1],
+              end < _opaqueRecords.length ? _opaqueRecords[end] : null,
+            );
       if (end > index + 1) {
+        activeRenderCounters.batches++;
+        activeRenderCounters.batchedItems += end - index;
         _batchPool.reset();
         for (var batchIndex = index; batchIndex < end; batchIndex++) {
           final item = _opaqueRecords[batchIndex].item;
@@ -1219,6 +1445,9 @@ base class SceneEncoder {
           record.material,
           _batchPool.batches,
           record.fade,
+          item: item,
+          batchedItems: end - index,
+          batchBreak: batchBreak,
         );
         index = end;
         continue;
@@ -1246,6 +1475,8 @@ base class SceneEncoder {
               : null,
           attributeData: item.instanceAttributeData,
           attributeFloats: item.instanceAttributeFloats,
+          item: item,
+          batchBreak: batchBreak,
         );
       } else {
         _encode(
@@ -1255,6 +1486,8 @@ base class SceneEncoder {
           record.material,
           record.windingFlipped,
           record.fade,
+          item: item,
+          batchBreak: batchBreak,
         );
       }
       index++;
@@ -1522,6 +1755,7 @@ base class SceneEncoder {
   void _flushTranslucentThrough(int end, {gpu.RenderPass? translucentPass}) {
     _prepareTranslucent();
     if (_translucentCursor >= _translucentRecords.length) return;
+    _phase = DrawPhase.translucent;
 
     if (translucentPass != null) {
       _renderPass = translucentPass;
@@ -1593,6 +1827,7 @@ base class SceneEncoder {
               : null,
           attributeData: record.item.instanceAttributeData,
           attributeFloats: record.item.instanceAttributeFloats,
+          item: record.item,
         );
       } else {
         _encode(
@@ -1602,6 +1837,7 @@ base class SceneEncoder {
           record.material,
           record.windingFlipped,
           record.fade,
+          item: record.item,
         );
       }
     }

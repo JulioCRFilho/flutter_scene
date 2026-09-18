@@ -10,6 +10,8 @@ uniform FrameInfo {
 }
 frame_info;
 
+#include <view_vector.glsl>
+
 // Per-vertex unit quad (slot 0): corner in [-0.5, 0.5] and its UV in [0, 1].
 in vec2 corner;
 in vec2 quad_uv;
@@ -43,11 +45,8 @@ void main() {
 
   vec3 world_up = frame_info.world_up.xyz;
   vec3 world_center = (frame_info.model_transform * vec4(i_center, 1.0)).xyz;
-  vec3 view_dir = world_center - frame_info.camera_position.xyz;
-  // Guard the degenerate case of a particle at the eye.
-  vec3 to_eye = dot(view_dir, view_dir) > 1e-12
-      ? normalize(-view_dir)
-      : vec3(0.0, 0.0, 1.0);
+  vec3 to_eye = DirectionToViewer(frame_info.camera_transform,
+                                  frame_info.camera_position.xyz, world_center);
 
   vec3 right;
   vec3 up;

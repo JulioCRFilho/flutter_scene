@@ -10,22 +10,24 @@
 // be declared before it is included.
 
 // Applies offset/scale plus a cosine/sine rotation pair to texture coordinates.
-vec2 ApplyMaterialUvTransform(vec2 uv, vec4 transform, vec2 rotation) {
-  vec2 scaled = uv * transform.zw;
+highp vec2 ApplyMaterialUvTransform(highp vec2 uv, highp vec4 transform,
+                                    vec2 rotation) {
+  highp vec2 scaled = uv * transform.zw;
   return transform.xy +
          vec2(rotation.x * scaled.x - rotation.y * scaled.y,
               rotation.y * scaled.x + rotation.x * scaled.y);
 }
 
 // Applies a texture transform whose rotation is stored as an angle.
-vec2 ApplyMaterialUvTransform(vec2 uv, vec4 transform, float rotation) {
+highp vec2 ApplyMaterialUvTransform(highp vec2 uv, highp vec4 transform,
+                                    float rotation) {
   return ApplyMaterialUvTransform(
       uv, transform, vec2(cos(rotation), sin(rotation)));
 }
 
 // Selects the packed UV channel and applies its texture transform.
-vec2 MaterialTextureUv(vec4 transform, vec4 rotation) {
-  vec2 uv = GetUV(int(rotation.z + 0.5));
+highp vec2 MaterialTextureUv(highp vec4 transform, highp vec4 rotation) {
+  highp vec2 uv = GetUV(int(rotation.z + 0.5));
   return ApplyMaterialUvTransform(uv, transform, rotation.xy);
 }
 
@@ -46,6 +48,9 @@ struct MaterialInputs {
   float specular;
   // Ambient occlusion in [0, 1]: 1 unoccluded.
   float occlusion;
+  // A value the material wants to inspect. Never shaded; shown raw by the
+  // `custom` surface debug channel (see material_debug.glsl).
+  vec3 debug;
 #ifdef FLUTTER_SCENE_PHYSICAL_MATERIAL
   // Advanced physical fields. These exist only in physical shader variants,
   // so standard/unlit materials keep their original interface and cost.
@@ -63,7 +68,7 @@ struct MaterialInputs {
   vec3 diffuse_transmission_color;
   float anisotropy;
   vec2 anisotropy_direction;
-  vec2 anisotropy_uv;
+  highp vec2 anisotropy_uv;
   float iridescence;
   float iridescence_ior;
   float iridescence_thickness;
@@ -83,6 +88,7 @@ MaterialInputs InitMaterialInputs() {
   material.roughness = 1.0;
   material.specular = 1.0;
   material.occlusion = 1.0;
+  material.debug = vec3(0.0);
 #ifdef FLUTTER_SCENE_PHYSICAL_MATERIAL
   material.specular_color = vec3(1.0);
   material.specular_weight = 1.0;

@@ -37,6 +37,10 @@ on:
         description: "Argos name prefix, keeps a non-master run off the baseline"
         required: false
         default: ""
+      flutter_revision:
+        description: "Pin the Apple shards to one Flutter framework commit (bisecting)"
+        required: false
+        default: ""
 
 concurrency:
   group: >-
@@ -134,7 +138,7 @@ jobs:
           echo "base_ref=$base" >> "$GITHUB_OUTPUT"
 
   render:
-    name: ${{ inputs.argos_prefix || '' }}${{ matrix.build_name }} (Flutter ${{ inputs.flutter_channel || 'master' }})
+    name: ${{ inputs.argos_prefix || '' }}${{ matrix.build_name }} (Flutter ${{ inputs.flutter_revision || inputs.flutter_channel || 'master' }})
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -158,12 +162,17 @@ jobs:
           # channel override adds the environment block, so a wrong guess about
           # that field cannot take the whole matrix down with it.
           channel="${{ inputs.flutter_channel || 'master' }}"
+          revision="${{ inputs.flutter_revision || '' }}"
           body=$(jq -nc \
             --arg appId "$CODEMAGIC_APP_ID" \
             --arg workflowId "${{ matrix.workflow_id }}" \
             --arg branch "${{ needs.prepare.outputs.branch }}" \
             '{appId: $appId, workflowId: $workflowId, branch: $branch}')
-          if [ "$channel" != "master" ]; then
+          if [ -n "$revision" ]; then
+            body=$(printf '%s' "$body" | jq -c \
+              --arg revision "$revision" \
+              '. + {environment: {variables: {FLUTTER_REVISION: $revision}}}')
+          elif [ "$channel" != "master" ]; then
             body=$(printf '%s' "$body" | jq -c \
               --arg channel "$channel" \
               '. + {environment: {variables: {FLUTTER_CHANNEL: $channel}}}')
@@ -201,6 +210,16 @@ jobs:
             if [ -n "$finished" ]; then
               echo "Codemagic build $BUILD_ID ended with status $status"
               printf '%s' "$out" > build.json
+              # The per-step timeline, so a build that ran to its cap says
+              # which step it was sitting in. The array name is checked
+              # loosely and the object's keys are listed when none matches,
+              # since the response shape is not documented.
+              printf '%s' "$out" | jq -r '
+                .build as $b
+                | ($b.buildActions // $b.actions // $b.steps // [])
+                | if length == 0 then "no step list; build keys: " + ($b | keys | tostring)
+                  else .[] | "\(.name // .type // "?")\t\(.status // "?")\t\(.startedAt // "")\t\(.finishedAt // "")" end' \
+                2>/dev/null || true
               echo "status=$status" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -250,6 +269,14 @@ jobs:
           count=$(find smoke -type f -name '*.png' | wc -l | tr -d ' ')
           echo "frames: $count"
           echo "count=$count" >> "$GITHUB_OUTPUT"
+          # The drive's own log, published by the iOS workflow; its tail is
+          # the first thing to read when a render died.
+          drive_log=$(find staging -type f -name 'smoke-drive.log' | head -1)
+          if [ -n "$drive_log" ]; then
+            echo "::group::flutter drive output (last 400 lines)"
+            tail -n 400 "$drive_log"
+            echo "::endgroup::"
+          fi
 
       - name: Upload to Argos
         id: argos

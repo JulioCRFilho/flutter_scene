@@ -6,6 +6,9 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show AssetBundle;
 import 'package:flutter_scene/src/hot_reload/hot_reload_coordinator.dart';
+import 'package:flutter_scene/src/render/viewport_camera.dart';
+import 'package:flutter_scene/src/render/projection_params.dart';
+import 'package:flutter_scene/src/render/debug_view.dart';
 import 'package:flutter_scene/src/render/frame_transients.dart';
 import 'package:flutter_scene/src/render/mip_sampling_probe.dart';
 import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
@@ -29,9 +32,11 @@ import 'god_rays.dart';
 import 'light.dart';
 import 'material/environment.dart';
 import 'material/material.dart';
+import 'memory_pressure.dart';
 import 'mesh.dart';
 import 'node.dart';
 import 'raycast.dart';
+import 'scene_tick_listener.dart';
 import 'physics/physics_world.dart';
 import 'environment_settings.dart';
 import 'environment_volume.dart';
@@ -55,6 +60,8 @@ import 'render/irradiance_field.dart';
 import 'render/irradiance_pass.dart';
 import 'render/render_graph.dart';
 import 'render/render_graph_capture.dart';
+import 'render/render_stats.dart';
+import 'scene_encoder.dart' show pipelineCacheSize;
 import 'render/render_scene.dart';
 import 'render/planar_reflection.dart';
 import 'render/planar_reflection_pass.dart';
@@ -62,6 +69,8 @@ import 'render/punctual_lights.dart';
 import 'render/point_shadow.dart';
 import 'render/spot_shadow.dart';
 import 'render/scene_pass.dart';
+import 'render/render_quality.dart';
+import 'scene_encoder.dart' show maxSceneColorCaptureBatches;
 import 'render/ssr_pass.dart';
 import 'screen_space_reflections.dart';
 import 'render/selection_outline_pass.dart';
@@ -71,6 +80,7 @@ import 'material/shadow_catcher_material.dart';
 import 'render/shadow_catcher_bake_pass.dart';
 import 'render/shadow_cache.dart';
 import 'render/shadow_pass.dart';
+import 'render/shadow_receiver_culling.dart';
 import 'render/ssao_pass.dart';
 import 'render/resolve_pass.dart';
 import 'render_texture.dart';
@@ -254,10 +264,12 @@ base class Scene implements SceneGraph {
   /// The anti-aliasing technique that actually runs when this [Scene]
   /// renders.
   ///
-  /// Resolves the requested [antiAliasingMode] against backend support:
-  /// [AntiAliasingMode.auto] becomes [AntiAliasingMode.msaa] where
-  /// offscreen MSAA is supported and [AntiAliasingMode.fxaa] otherwise,
-  /// and an unsupported [AntiAliasingMode.msaa] request also resolves to
+  /// Resolves the requested [antiAliasingMode] against the quality tier and
+  /// backend support: [AntiAliasingMode.auto] follows
+  /// [effectiveRenderQualityTier] ([RenderQualityTier.high] picks
+  /// [AntiAliasingMode.msaa] where offscreen MSAA is supported and
+  /// [AntiAliasingMode.fxaa] otherwise, medium picks fxaa, low picks none),
+  /// and an unsupported [AntiAliasingMode.msaa] request resolves to
   /// [AntiAliasingMode.fxaa]. Never returns [AntiAliasingMode.auto].
   AntiAliasingMode get effectiveAntiAliasingMode =>
       _resolveAntiAliasingMode(_antiAliasingMode);
@@ -273,10 +285,20 @@ base class Scene implements SceneGraph {
       case AntiAliasingMode.taa:
         return AntiAliasingMode.taa;
       case AntiAliasingMode.msaa:
-      case AntiAliasingMode.auto:
         return _offscreenMsaaSupported
             ? AntiAliasingMode.msaa
             : AntiAliasingMode.fxaa;
+      case AntiAliasingMode.auto:
+        switch (effectiveRenderQualityTier) {
+          case RenderQualityTier.low:
+            return AntiAliasingMode.none;
+          case RenderQualityTier.medium:
+            return AntiAliasingMode.fxaa;
+          case RenderQualityTier.high:
+            return _offscreenMsaaSupported
+                ? AntiAliasingMode.msaa
+                : AntiAliasingMode.fxaa;
+        }
     }
   }
 
@@ -404,6 +426,7 @@ base class Scene implements SceneGraph {
     if (_initializeStaticResources != null) {
       return _initializeStaticResources!;
     }
+    listenForMemoryPressure();
     _initializeStaticResources =
         Future.wait([
               loadBaseShaderLibrary(),
@@ -516,13 +539,91 @@ base class Scene implements SceneGraph {
   /// Whether punctual lights shade through per-view froxel clustering (the
   /// view frustum subdivided into screen tiles and depth slices, each shading
   /// only the lights that reach it) instead of per-object light lists. On by
-  /// default; perspective views use it automatically, while orthographic
-  /// views and frames using light channel masks fall back to the per-object
-  /// path. Clustering removes the per-object light cap, so a large mesh
+  /// default for perspective and orthographic views; frames using light
+  /// channel masks fall back to the per-object path. Clustering removes the per-object light cap, so a large mesh
   /// reached by many lights shades them all. Disable to compare, or to force
   /// the per-object path.
   /// {@category Lighting and environment}
   bool punctualLightClustering = true;
+
+  /// How many frames of GPU work may be outstanding before a screen view
+  /// presents its previous image again instead of encoding a new frame.
+  ///
+  /// The Vulkan and Metal backends encode and queue GPU work on the thread
+  /// that calls [render]; when the GPU falls behind, queuing more work blocks
+  /// that thread for the backlog (the queue is serialized with the raster
+  /// thread's own submissions), so a GPU-bound scene stalls the UI thread
+  /// and everything else on it. Pacing instead re-presents the last frame
+  /// once [maxGpuFramesInFlight] frames are still running; the scene updates
+  /// at the rate the GPU finishes frames, which it did anyway. Scene time
+  /// still advances on a paced frame.
+  ///
+  /// The default of 1 keeps the UI thread free and costs about a tenth of
+  /// GPU throughput on a saturated GPU. 2 keeps the throughput but only
+  /// halves the stall on drivers with shallow queues. Set to 0 to always
+  /// encode. Only screen views pace; render-to-texture views always render.
+  /// {@category Rendering}
+  int maxGpuFramesInFlight = 1;
+
+  /// Frames a screen view has presented from its previous image because the
+  /// GPU was [maxGpuFramesInFlight] frames behind. A diagnostic counter.
+  /// {@category Rendering}
+  int get pacedFrameCount => _pacedFrameCount;
+  int _pacedFrameCount = 0;
+
+  /// Notifies when the scene wants painting again outside any repaint the
+  /// app drives: a screen view held its previous image because the GPU was
+  /// [maxGpuFramesInFlight] frames behind, and that work has now finished.
+  /// [SceneView] listens. A custom painter that repaints only on demand
+  /// should pass this as its `repaint`, or the held frame never shows.
+  /// {@category Rendering}
+  Listenable get repaintRequested => _repaintRequested;
+  final _RepaintRequest _repaintRequested = _RepaintRequest();
+  bool _paceHeld = false;
+
+  // Asks for a repaint once the GPU work that paced a frame completes. The
+  // listener lives only while a frame is held.
+  void _holdPace() {
+    if (_paceHeld) return;
+    _paceHeld = true;
+    rendererSubmissions.addCompletionListener(_onPaceRelease);
+  }
+
+  void _onPaceRelease() {
+    if (rendererSubmissions.framesInFlight >= maxGpuFramesInFlight) return;
+    rendererSubmissions.removeCompletionListener(_onPaceRelease);
+    _paceHeld = false;
+    _repaintRequested.notify();
+  }
+
+  /// How many overlap-safe scene color captures a frame may open for
+  /// materials that read the opaque scene behind them (transmission), from 1
+  /// to [maxSceneColorCaptureBatches]. Readers whose screen bounds overlap
+  /// each get a fresh capture of everything drawn before them, and each
+  /// capture is a full-resolution copy plus a new render pass. Once the cap
+  /// is reached the remaining readers share the last snapshot, so they stop
+  /// seeing each other through glass. Null (the default) follows
+  /// [effectiveRenderQualityTier]: the full budget on high, two on medium,
+  /// one on low (every reader shares one capture, the cost of a single
+  /// reader). See [effectiveSceneColorCaptureBatches].
+  /// {@category Rendering}
+  int? sceneColorCaptureBatches;
+
+  /// The capture budget in effect, [sceneColorCaptureBatches] clamped, or the
+  /// tier's default when it is null.
+  /// {@category Rendering}
+  int get effectiveSceneColorCaptureBatches {
+    final explicit = sceneColorCaptureBatches;
+    if (explicit != null) return explicit.clamp(1, maxSceneColorCaptureBatches);
+    switch (effectiveRenderQualityTier) {
+      case RenderQualityTier.low:
+        return 1;
+      case RenderQualityTier.medium:
+        return 2;
+      case RenderQualityTier.high:
+        return maxSceneColorCaptureBatches;
+    }
+  }
 
   /// The scene's primary camera.
   ///
@@ -723,6 +824,46 @@ base class Scene implements SceneGraph {
   /// effect is off by default.
   final PostProcessSettings postProcess = PostProcessSettings();
 
+  /// Surface debug views: show a resolved material channel, a geometry
+  /// attribute, an identity color, or a validation flag in place of the lit
+  /// result, optionally split against it, plus overlays such as wireframe.
+  ///
+  /// Works in every build. While anything here is active the frame skips
+  /// its post effects, temporal and post anti-aliasing, so the pixels on
+  /// screen are the values the materials produced. A `Node.debugView`
+  /// overrides [SceneDebugSettings.view] for its subtree.
+  /// {@category Rendering}
+  final SceneDebugSettings debug = SceneDebugSettings();
+
+  /// The id of the active surface debug view in [DebugViewRegistry], or
+  /// `none`. Setting an unknown id throws an [ArgumentError].
+  /// {@category Rendering}
+  String get debugViewId => debug.viewId;
+  set debugViewId(String id) {
+    final entry = DebugViewRegistry.byId(id);
+    if (entry == null) {
+      throw ArgumentError.value(id, 'id', 'Not a registered debug view');
+    }
+    debug.view = entry.view;
+  }
+
+  // The per-frame debug view state, or null when nothing debug-related is
+  // active (the common case, which costs nothing).
+  DebugViewFrame? _debugViewFrame(ui.Size pixelSize) {
+    final hasOverrides = Node.debugViewOverrideCount > 0;
+    if (!debug.isActive && !hasOverrides) return null;
+    final split = debug.split;
+    return DebugViewFrame(
+      sceneView: debug.view,
+      splitPixels: split == null
+          ? -1.0
+          : split.clamp(0.0, 1.0) * pixelSize.width,
+      hasNodeOverrides: hasOverrides,
+      overlays: Set.of(debug.overlays),
+      wireframeColor: debug.wireframeColor,
+    );
+  }
+
   /// The scene's blendable look (image-based lighting, exposure, tone mapping,
   /// and post-processing) as a copyable value.
   ///
@@ -801,23 +942,27 @@ base class Scene implements SceneGraph {
       debugLastPlanarCapturePasses = const [];
       return const [];
     }
-    // The oblique near-plane clip is a perspective-projection modification;
-    // other projections render without planar reflections (like the other
-    // camera-reconstruction effects).
-    final perspective = camera.projection is PerspectiveProjection;
+    final orthographic = ProjectionParams.of(
+      camera.projection,
+      pixelSize,
+    ).orthographic;
     final groups = <Object, List<PlanarReflectorComponent>>{};
     Frustum? frustum;
     for (final reflector in reflectors) {
       var active =
-          perspective &&
           reflector.enabled &&
           reflector.node.internalEffectiveVisible &&
           (reflector.node.layers & view.layerMask) != 0;
       if (active) {
         // A camera on or behind the mirror plane sees the surface's back (or
-        // nothing), so there is no reflection to capture.
+        // nothing), so there is no reflection to capture. Parallel view rays
+        // all share one direction, so an orthographic camera faces the mirror
+        // exactly when it looks against the plane normal.
         final plane = reflector.worldPlane();
-        if (plane.normal.dot(camera.position) + plane.constant <= 0.0) {
+        final facesBack = orthographic
+            ? plane.normal.dot(camera.forward) >= 0.0
+            : plane.normal.dot(camera.position) + plane.constant <= 0.0;
+        if (facesBack) {
           active = false;
         }
       }
@@ -1187,6 +1332,12 @@ base class Scene implements SceneGraph {
   /// {@category Rendering}
   bool removeRenderPass(CustomRenderPass pass) => _renderPasses.remove(pass);
 
+  /// Steady-state rendering statistics: the last frame's draw, culling,
+  /// batching, and pipeline counters broken down by view and by pass, with
+  /// CPU times, plus a bounded history. Always collected.
+  /// {@category Debugging and profiling}
+  final RenderStats renderStats = RenderStats();
+
   /// Opt-in for [captureRenderGraph] and the render-graph debug hooks.
   /// False (the shipping default) keeps the capture branch tree-shakeable;
   /// an editor or debugging host sets it at startup.
@@ -1255,23 +1406,20 @@ base class Scene implements SceneGraph {
       _renderPasses.where((p) => p.enabled && p.stage == stage);
 
   /// Screen-space ambient occlusion settings. Off by default; set
-  /// [AmbientOcclusionSettings.enabled] to turn it on. Requires a
-  /// [PerspectiveCamera] (the occlusion is reconstructed from the camera's
-  /// perspective depth); it is skipped for other camera types.
+  /// [AmbientOcclusionSettings.enabled] to turn it on. Works with perspective
+  /// and orthographic cameras.
   final AmbientOcclusionSettings ambientOcclusion = AmbientOcclusionSettings();
 
   /// Screen-space reflection settings. Off by default; set
-  /// [ScreenSpaceReflectionsSettings.enabled] to turn it on. Requires a
-  /// [PerspectiveCamera] (the reflection trace is reconstructed from the
-  /// camera's perspective depth); it is skipped for other camera types.
+  /// [ScreenSpaceReflectionsSettings.enabled] to turn it on. Works with
+  /// perspective and orthographic cameras.
   final ScreenSpaceReflectionsSettings screenSpaceReflections =
       ScreenSpaceReflectionsSettings();
 
   /// World-space global illumination settings. Off by default; set
   /// [GlobalIlluminationSettings.enabled] to turn the irradiance field on.
-  /// Requires a [PerspectiveCamera] (the injection scatter reconstructs world
-  /// positions from the camera's perspective depth); it is skipped for other
-  /// camera types, and it forces the depth prepass with normals on.
+  /// Works with perspective and orthographic cameras, and forces the depth
+  /// prepass with normals on.
   final GlobalIlluminationSettings globalIllumination =
       GlobalIlluminationSettings();
 
@@ -1299,6 +1447,50 @@ base class Scene implements SceneGraph {
   /// for a hard camera cut or a wholesale lighting change that should not
   /// converge in over the hysteresis tail.
   void invalidateGlobalIllumination() => _irradianceField.invalidate();
+
+  /// Where this scene's automatic settings sit on the quality ladder, and
+  /// whether the renderer may lower them itself when frames overrun a
+  /// target. See [RenderQualitySettings]; [effectiveRenderQualityTier] and
+  /// [adaptiveRenderScale] report what is in effect.
+  /// {@category Rendering}
+  final RenderQualitySettings renderQuality = RenderQualitySettings();
+
+  late final AdaptiveQualityController _adaptiveQuality =
+      AdaptiveQualityController(renderQuality);
+  final Stopwatch _frameClock = Stopwatch();
+
+  /// The quality tier in effect: [RenderQualitySettings.tier] (or the
+  /// platform default), lowered by any steps the adaptive controller took.
+  /// {@category Rendering}
+  RenderQualityTier get effectiveRenderQualityTier =>
+      _adaptiveQuality.effectiveTier(
+        renderQuality.tier ?? RenderQualitySettings.platformDefaultTier,
+      );
+
+  /// The multiplier the adaptive controller currently applies on top of
+  /// [renderScale]; 1.0 unless [RenderQualitySettings.adaptive] has stepped
+  /// it down.
+  /// {@category Rendering}
+  double get adaptiveRenderScale =>
+      renderQuality.adaptive ? _adaptiveQuality.scale : 1.0;
+
+  // Feeds the adaptive controller one frame period, measured between
+  // consecutive frames on this thread (a GPU-bound frame stalls it too).
+  void _tickAdaptiveQuality() {
+    if (!renderQuality.adaptive) {
+      _adaptiveQuality.reset();
+      _frameClock.reset();
+      return;
+    }
+    if (!_frameClock.isRunning) {
+      _frameClock.start();
+      return;
+    }
+    final seconds = _frameClock.elapsedMicroseconds / 1e6;
+    _frameClock.reset();
+    _frameClock.start();
+    _adaptiveQuality.update(seconds);
+  }
 
   /// Temporal anti-aliasing settings. Active when [antiAliasingMode] is
   /// [AntiAliasingMode.taa].
@@ -1392,8 +1584,22 @@ base class Scene implements SceneGraph {
   // physics driver can take an integer number of steps per frame.
   double _physicsAccumulator = 0;
 
+  final SceneTickListeners _tickListeners = SceneTickListeners();
+
+  /// Registers [listener] to run at the start of every tick and before every
+  /// fixed step, ahead of all components. Listeners run in the order added.
+  ///
+  /// Adding a listener that is already registered does nothing.
+  void addTickListener(SceneTickListener listener) =>
+      _tickListeners.add(listener);
+
+  /// Unregisters [listener]. Returns whether it was registered.
+  bool removeTickListener(SceneTickListener listener) =>
+      _tickListeners.remove(listener);
+
   void _tick(double deltaSeconds) {
     _lastTickMillis = DateTime.now().millisecondsSinceEpoch;
+    _tickListeners.beforeTick(deltaSeconds);
     _stepPhysics(deltaSeconds);
     root.scenePrePass(deltaSeconds);
     _syncAudio(deltaSeconds);
@@ -1405,7 +1611,7 @@ base class Scene implements SceneGraph {
   void _syncAudio(double frameDt) {
     root.getComponent<AudioEngine>()?.frameSync(
       frameDt,
-      fallbackCamera: camera,
+      fallbackCamera: renderScene.listenerCamera,
     );
   }
 
@@ -1420,10 +1626,15 @@ base class Scene implements SceneGraph {
     }
     _physicsAccumulator = advancePhysics(
       world: world,
-      fixedUpdateWalk: root.sceneFixedPass,
+      fixedUpdateWalk: _fixedStep,
       accumulator: _physicsAccumulator,
       frameDt: frameDt,
     );
+  }
+
+  void _fixedStep(double fixedDt) {
+    _tickListeners.beforeFixedStep(fixedDt);
+    root.sceneFixedPass(fixedDt);
   }
 
   /// Fixed-step substepping driver. Adds [frameDt] to [accumulator],
@@ -1580,6 +1791,7 @@ base class Scene implements SceneGraph {
     ui.Rect? region,
     double? pixelRatio,
   }) {
+    renderScene.recordRenderedViews(views);
     if (!_readyToRender) {
       debugPrint('Flutter Scene is not ready to render. Skipping frame.');
       debugPrint(
@@ -1600,6 +1812,8 @@ base class Scene implements SceneGraph {
       }());
       return;
     }
+
+    renderStats.beginFrame();
 
     // Blend the environment volumes over the base by the primary view's camera
     // position, before the environment, sky bake, and sun light are read.
@@ -1674,6 +1888,7 @@ base class Scene implements SceneGraph {
       _tick((nowMillis - lastMillis) / 1000.0);
     }
     _tickedThisFrame = false;
+    _tickAdaptiveQuality();
 
     // Rebuild the spatial culling structure once if the pre-pass changed the
     // scene, before the views' render passes query it.
@@ -1845,6 +2060,9 @@ base class Scene implements SceneGraph {
         capturePlanarReflections: identical(view, planarCaptureView),
       );
     }
+
+    renderStats.endFrame(pipelineCacheSize: pipelineCacheSize);
+    rendererSubmissions.endFrame();
 
     // A frame has now been submitted; the next one runs on a warm context (see
     // the rebuild near the environment resolution above).
@@ -2053,7 +2271,8 @@ base class Scene implements SceneGraph {
     // high-DPI devices). See: https://github.com/bdero/flutter_scene/issues/60
     // The render scale multiplies on top, trading resolution for fragment
     // work (or supersampling above 1.0).
-    final scale = dpr * (view.renderScale ?? _renderScale);
+    final scale =
+        dpr * (view.renderScale ?? _renderScale) * adaptiveRenderScale;
     final pixelSize = ui.Size(
       (drawArea.width * scale).ceilToDouble(),
       (drawArea.height * scale).ceilToDouble(),
@@ -2062,14 +2281,35 @@ base class Scene implements SceneGraph {
       return;
     }
 
+    final pendingCapture = _pendingGraphCapture;
+    final captureThisView =
+        pendingCapture != null && pendingCapture.viewIndex == viewIndex;
+
+    // Pace the GPU: with enough frames still running, present the previous
+    // image rather than queue work the calling thread would block on. A
+    // pending capture must observe a rendered frame, so it is never paced.
+    final previous = surface.lastSwapchainColorTexture(viewIndex);
+    if (!captureThisView &&
+        maxGpuFramesInFlight > 0 &&
+        previous != null &&
+        previous.width == pixelSize.width.toInt() &&
+        previous.height == pixelSize.height.toInt() &&
+        rendererSubmissions.framesInFlight >= maxGpuFramesInFlight) {
+      _pacedFrameCount++;
+      _holdPace();
+      final srcRect = ui.Rect.fromLTWH(0, 0, pixelSize.width, pixelSize.height);
+      final paint = ui.Paint()
+        ..filterQuality = view.filterQuality ?? filterQuality;
+      canvas.drawImageRect(previous.asImage(), srcRect, drawArea, paint);
+      return;
+    }
+
     // Consume a pending render-graph capture aimed at this screen view.
     RenderGraphCapturer? capturer;
-    final pendingCapture = _pendingGraphCapture;
-    if (pendingCapture != null && pendingCapture.viewIndex == viewIndex) {
+    if (captureThisView) {
       _pendingGraphCapture = null;
       capturer = RenderGraphCapturer(request: pendingCapture.request);
     }
-
     final gpu.Texture swapchainColor = surface.getNextSwapchainColorTexture(
       pixelSize,
       viewIndex,
@@ -2078,6 +2318,7 @@ base class Scene implements SceneGraph {
       view: view,
       outputColor: swapchainColor,
       pixelSize: pixelSize,
+      viewportSize: drawArea.size,
       pool: surface.transientTexturePool(viewIndex),
       environmentMap: environmentMap,
       transientsBuffer: transientsBuffer,
@@ -2086,6 +2327,7 @@ base class Scene implements SceneGraph {
       spotShadowFrame: spotShadowFrame,
       pointShadowFrame: pointShadowFrame,
       capturer: capturer,
+      viewIndex: viewIndex,
       capturePlanarReflections: capturePlanarReflections,
     );
     if (capturer != null) {
@@ -2112,6 +2354,10 @@ base class Scene implements SceneGraph {
     required RenderView view,
     required gpu.Texture outputColor,
     required ui.Size pixelSize,
+    // The view's logical size, which the camera projection resolves against
+    // (see CameraProjection.getProjectionMatrixForViewport). Defaults to
+    // [pixelSize] for views with no logical size (render textures, probes).
+    ui.Size? viewportSize,
     required TransientTexturePool pool,
     required EnvironmentMap environmentMap,
     required TransientWriter transientsBuffer,
@@ -2120,6 +2366,9 @@ base class Scene implements SceneGraph {
     required SpotShadowFrame? spotShadowFrame,
     required PointShadowFrame? pointShadowFrame,
     RenderGraphCapturer? capturer,
+    // The screen view index for stats attribution, or -1 for an offscreen
+    // render (a render texture, a probe, a warm-up frame).
+    int viewIndex = -1,
     // A linear-HDR capture (environment probes): the graph stops after the
     // scene pass and blits the lit scene color into [outputColor], with no
     // reflections, indirect-light history, post-processing, anti-aliasing,
@@ -2136,23 +2385,44 @@ base class Scene implements SceneGraph {
     if (capturer != null) {
       pool = ObservedTexturePool(pool, capturer);
     }
-    final camera = view.camera;
+    final viewStats = renderStats.beginView(
+      viewIndex: viewIndex,
+      width: pixelSize.width.toInt(),
+      height: pixelSize.height.toInt(),
+      offscreen: viewIndex < 0,
+    );
+    final viewWatch = viewStats == null ? null : (Stopwatch()..start());
+    // Bound to the logical size so every pass renders the volume picking
+    // hits, whatever render-target size it passes.
+    final camera = ViewportBoundCamera(view.camera, viewportSize ?? pixelSize);
     final effectiveAa = captureLinearColor
         ? AntiAliasingMode.none
         : _resolveAntiAliasingMode(view.antiAliasingMode ?? _antiAliasingMode);
+    // A surface debug view or overlay turns the frame into a measurement:
+    // every post effect and every anti-aliasing pass that resamples the
+    // image is skipped so the pixels are the values the materials wrote
+    // (multisampling stays, it never moves a value between pixels).
+    final debugFrame = _debugViewFrame(pixelSize);
+    final debugActive = debugFrame != null;
+    final wantDof = depthOfField.enabled && !debugActive;
     final enableMsaa = effectiveAa == AntiAliasingMode.msaa;
-    final enableFxaa = effectiveAa == AntiAliasingMode.fxaa;
+    final enableFxaa = effectiveAa == AntiAliasingMode.fxaa && !debugActive;
     final enableSmaa =
-        effectiveAa == AntiAliasingMode.smaa && SmaaPass.isInitialized;
+        effectiveAa == AntiAliasingMode.smaa &&
+        SmaaPass.isInitialized &&
+        !debugActive;
 
     final light = lightComponent?.light;
     final lightDirection = lightComponent?.worldDirection;
-    // Cascaded shadows fit the camera frustum, so they require a
-    // perspective projection; other projections render without shadows.
-    final cascades =
-        light != null &&
-            light.castsShadow &&
-            camera.projection is PerspectiveProjection
+    // Every depth-reconstructing effect reads the projection through these
+    // terms, so perspective, orthographic, and custom projections all take
+    // the same paths. A degenerate projection (zero extent) skips them.
+    final projection = ProjectionParams.of(camera.projection, pixelSize);
+    final projectionValid =
+        projection.scaleX > 0.0 &&
+        projection.scaleY > 0.0 &&
+        projection.far > projection.near;
+    final cascades = light != null && light.castsShadow && projectionValid
         ? light.computeCascades(
             camera,
             pixelSize.width / pixelSize.height,
@@ -2164,13 +2434,16 @@ base class Scene implements SceneGraph {
     // need both and a shadow-casting directional light.
     final wantGodRays =
         godRays.enabled &&
-        camera.projection is PerspectiveProjection &&
-        cascades.isNotEmpty;
+        projectionValid &&
+        cascades.isNotEmpty &&
+        !debugActive;
 
     // A pure display-referred image warp; no depth, shadow, or camera
     // projection needed.
     final wantScreenDistortion =
-        screenDistortion.enabled && screenDistortion.pulses.isNotEmpty;
+        screenDistortion.enabled &&
+        screenDistortion.pulses.isNotEmpty &&
+        !debugActive;
 
     // The geometry buffers the enabled custom passes (and god rays) request, so
     // the engine produces depth/normals even without AO/SSR and publishes the
@@ -2248,7 +2521,7 @@ base class Scene implements SceneGraph {
     final bindSceneDepth = materialInputs.contains(RenderInput.depth);
     if (bindSceneDepth) customInputs.add(RenderInput.depth);
     // Depth of field reconstructs blur from camera depth.
-    if (depthOfField.enabled) customInputs.add(RenderInput.depth);
+    if (wantDof) customInputs.add(RenderInput.depth);
 
     // When any visible caster is static, route the cascades through the
     // shadow cache: static casters render into persistent tiles only when
@@ -2273,6 +2546,58 @@ base class Scene implements SceneGraph {
       _directionalShadowCache = null;
     }
 
+    // Baked shadow catchers refresh their footprint caches right after the
+    // atlas renders, so the scene pass samples a current cache this frame.
+    // Live catchers may widen their own shadow filter, which the receiver
+    // culling margin must cover.
+    List<RenderItem>? catcherBakes;
+    var maxReceiverSoftness = light?.shadowSoftness ?? 0.0;
+    for (final item in renderScene.items) {
+      final material = item.material;
+      if (!item.visible || material is! ShadowCatcherMaterial) continue;
+      if (material.needsBakedShadowRefresh) {
+        (catcherBakes ??= []).add(item);
+      }
+      maxReceiverSoftness = math.max(maxReceiverSoftness, material.softness);
+    }
+
+    // Cull cascade casters that cannot shadow anything this view shades. Only
+    // when every atlas reader is bounded by this camera: catcher bakes,
+    // planar captures, and custom passes can sample off-screen receivers.
+    // TODO(shadow-receiver-culling): fold the reflected cameras' frustums
+    // into the receiver volume instead of skipping frames with planar
+    // captures, and cull spot and point shadow tiles the same way.
+    var cascadeReceiverPlanes = const <List<Plane>>[];
+    final receiverCullingAllowed =
+        !debugDisableShadowReceiverCulling &&
+        effectiveCascades.isNotEmpty &&
+        catcherBakes == null &&
+        !(capturePlanarReflections &&
+            !captureLinearColor &&
+            renderScene.planarReflectorComponents.isNotEmpty) &&
+        !_renderPasses.any(
+          (pass) => pass.enabled && pass.inputs.contains(RenderInput.shadowMap),
+        );
+    if (receiverCullingAllowed) {
+      final receiverFrustum = shadowReceiverFrustum(
+        camera.getViewTransform(pixelSize),
+        pixelSize,
+      );
+      cascadeReceiverPlanes = [
+        for (final cascade in effectiveCascades)
+          shadowReceiverCullingPlanes(
+                receiverFrustum: receiverFrustum,
+                lightSpaceMatrix: cascade.lightSpaceMatrix,
+                margin: shadowReceiverMargin(
+                  light!,
+                  cascade.boxSize,
+                  maxReceiverSoftness,
+                ),
+              ) ??
+              const <Plane>[],
+      ];
+    }
+
     final graph = RenderGraph();
     // Directional cascades, shadow-casting spots, and shadow-casting point
     // lights share one atlas (and so one sampler in the lit shader). All tiles
@@ -2286,6 +2611,7 @@ base class Scene implements SceneGraph {
         ShadowPass(
           renderScene: renderScene,
           cascades: effectiveCascades,
+          cascadeReceiverPlanes: cascadeReceiverPlanes,
           tileResolution: cascades.isNotEmpty
               ? light!.shadowMapResolution
               : spotShadowFrame?.tileResolution ??
@@ -2314,17 +2640,6 @@ base class Scene implements SceneGraph {
               : null,
         ),
       );
-    }
-    // Baked shadow catchers refresh their footprint caches right after the
-    // atlas renders, so the scene pass samples a current cache this frame.
-    List<RenderItem>? catcherBakes;
-    for (final item in renderScene.items) {
-      final material = item.material;
-      if (item.visible &&
-          material is ShadowCatcherMaterial &&
-          material.needsBakedShadowRefresh) {
-        (catcherBakes ??= []).add(item);
-      }
     }
     if (catcherBakes != null) {
       graph.addPass(
@@ -2360,17 +2675,11 @@ base class Scene implements SceneGraph {
     // Ambient occlusion, screen-space reflections, normals, and materials
     // that sample scene depth need the geometry prepass. Depth-only post
     // effects reuse the stored main-pass depth when it is single-sampled.
-    // Depth and normal pre-passes need a perspective camera. Orthographic
-    // cameras skip these effects.
-    final perspective = camera.projection;
-    final perspectiveCamera = perspective is PerspectiveProjection
-        ? perspective
-        : null;
-
     final enableTaa =
         effectiveAa == AntiAliasingMode.taa &&
-        perspectiveCamera != null &&
-        !captureLinearColor;
+        projectionValid &&
+        !captureLinearColor &&
+        !debugActive;
 
     Vector2 currentJitterNdc = Vector2.zero();
     Vector2 currentJitterUv = Vector2.zero();
@@ -2407,7 +2716,8 @@ base class Scene implements SceneGraph {
     // so capture whether they apply here and add the pass below.
     final wantSsr =
         !captureLinearColor &&
-        perspectiveCamera != null &&
+        !debugActive &&
+        projectionValid &&
         screenSpaceReflections.enabled;
     // A custom pass may request depth/normals; normals imply depth.
     final wantCustomNormals = customInputs.contains(RenderInput.normals);
@@ -2422,9 +2732,7 @@ base class Scene implements SceneGraph {
     // The irradiance field scatters from the depth prepass' normals and from
     // the previous frame's lit color, so it forces both on.
     final wantIrradianceField =
-        !captureLinearColor &&
-        perspectiveCamera != null &&
-        globalIllumination.enabled;
+        !captureLinearColor && projectionValid && globalIllumination.enabled;
     final wantSceneColorHistory = wantIndirectLight || wantIrradianceField;
     // The occlusion texture's channels carry radiance while indirect light
     // is on, so the contact-shadow term has nowhere to ride.
@@ -2445,7 +2753,7 @@ base class Scene implements SceneGraph {
         wantContactShadows ||
         wantCustomDepth;
     IrradianceFieldBinding? irradianceBinding;
-    if (perspectiveCamera != null) {
+    if (projectionValid) {
       // The occlusion chain also carries the sun contact-shadow term, so it
       // runs (with occlusion sampling zeroed) when only contact shadows ask
       // for it.
@@ -2484,7 +2792,7 @@ base class Scene implements SceneGraph {
             renderScene: renderScene,
             dimensions: depthDimensions,
             cameraForward: cameraForward,
-            farDepth: perspectiveCamera.far,
+            farDepth: projection.far,
             layerMask: view.layerMask,
             writeNormals: wantSsr || wantCustomNormals || wantIrradianceField,
             // Depth of field patches translucent surfaces into the linear
@@ -2492,8 +2800,7 @@ base class Scene implements SceneGraph {
             // Storing it (a non-transient attachment plus store bandwidth)
             // is paid whenever depth of field is on, patch or no patch.
             keepDepthStencil:
-                depthOfField.enabled ||
-                (enableTaa && temporalAntiAliasing.objectMotion),
+                wantDof || (enableTaa && temporalAntiAliasing.objectMotion),
             cameraRight: cameraRight,
             cameraUp: cameraUp,
             cullingPlanes: view.cullingPlanes,
@@ -2567,9 +2874,7 @@ base class Scene implements SceneGraph {
           SsaoPass(
             dimensions: pixelSize,
             settings: ambientOcclusion,
-            fovRadiansY: perspectiveCamera.fovRadiansY,
-            near: perspectiveCamera.near,
-            far: perspectiveCamera.far,
+            projection: projection,
             contactDirectionView: contactDirectionView,
             contactDistance: wantContactShadows
                 ? light.contactShadowDistance
@@ -2590,7 +2895,7 @@ base class Scene implements SceneGraph {
           cameraForward: cameraForward,
           cameraRight: cameraRight,
           cameraUp: cameraUp,
-          perspectiveCamera: perspectiveCamera,
+          projection: projection,
           environmentMap: environmentMap,
         );
       }
@@ -2624,18 +2929,20 @@ base class Scene implements SceneGraph {
         ssaoDirectLightAffect: ambientOcclusion.directLightAffect,
         ssaoMultiBounce: ambientOcclusion.multiBounce,
         ssaoBentNormals: ambientOcclusionCarriesBentNormals(ambientOcclusion),
-        ssaoContactShadows: wantContactShadows && perspectiveCamera != null,
-        ssaoIndirectLight: wantIndirectLight && perspectiveCamera != null,
+        ssaoContactShadows: wantContactShadows && projectionValid,
+        ssaoIndirectLight: wantIndirectLight && projectionValid,
         irradianceField: irradianceBinding,
         layerMask: view.layerMask,
         fog: fog,
         captureOpaqueColor: captureOpaqueColor,
-        // Depth binding needs the prepass, which needs a perspective camera.
-        bindSceneDepth: bindSceneDepth && perspectiveCamera != null,
+        maxCaptureBatches: effectiveSceneColorCaptureBatches,
+        // Depth binding needs the prepass, which needs a valid projection.
+        bindSceneDepth: bindSceneDepth && projectionValid,
         time: DateTime.now().millisecondsSinceEpoch.remainder(100000) / 1000.0,
         cullingPlanes: view.cullingPlanes,
         includeOffscreen: _warmUpIncludeOffscreen,
         cameraTransform: currentJitteredViewProjection,
+        debugView: debugFrame,
       ),
     );
     if (wantSceneColorHistory) {
@@ -2653,7 +2960,9 @@ base class Scene implements SceneGraph {
         transientsBuffer: transientsBuffer,
         texturePool: pool,
         observer: capturer,
+        stats: viewStats,
       );
+      _finishViewStats(viewStats, viewWatch);
       return;
     }
     // Screen-space reflections refine the lit HDR color in place, before
@@ -2664,9 +2973,7 @@ base class Scene implements SceneGraph {
         SsrPass(
           dimensions: pixelSize,
           settings: screenSpaceReflections,
-          fovRadiansY: perspectiveCamera.fovRadiansY,
-          near: perspectiveCamera.near,
-          far: perspectiveCamera.far,
+          projection: projection,
         ),
       );
     }
@@ -2674,7 +2981,7 @@ base class Scene implements SceneGraph {
     final beforeTonemap = <PostEffect>[];
     final afterTonemap = <PostEffect>[];
     for (final effect in postProcess.customEffects) {
-      if (!effect.enabled) {
+      if (!effect.enabled || debugActive) {
         continue;
       }
       if (effect.insertion == PostInsertion.beforeTonemap) {
@@ -2729,9 +3036,9 @@ base class Scene implements SceneGraph {
 
     // Depth of field on the linear HDR scene color, before the custom
     // effects and bloom so both act on the defocused image (bokeh highlights
-    // still bloom). Needs the perspective camera's FOV for the thin-lens
-    // math and camera depth.
-    if (depthOfField.enabled && perspectiveCamera != null) {
+    // still bloom). Needs the projection for the circle-of-confusion scale and
+    // camera depth.
+    if (wantDof && projectionValid) {
       // Translucent depth-writing surfaces (glass) join the linear depth
       // here, after the opaque-only consumers above, so depth of field
       // focuses on the visible surface instead of the backdrop behind it.
@@ -2748,7 +3055,7 @@ base class Scene implements SceneGraph {
         DofPass(
           settings: depthOfField,
           dimensions: pixelSize,
-          fovRadiansY: perspectiveCamera.fovRadiansY,
+          projection: projection,
         ),
       );
     }
@@ -2794,9 +3101,6 @@ base class Scene implements SceneGraph {
         Vector4(camera.position.x, camera.position.y, camera.position.z, 1.0),
       );
       final currentToPrev = prevViewProj * viewToWorld;
-      final halfFovY = perspectiveCamera.fovRadiansY * 0.5;
-      final tanHalfFovY = math.tan(halfFovY);
-      final tanHalfFovX = tanHalfFovY * (pixelSize.width / pixelSize.height);
 
       graph.addPass(
         TaaPass(
@@ -2805,10 +3109,7 @@ base class Scene implements SceneGraph {
           state: taaState,
           currentToPreviousViewProjection: currentToPrev,
           cameraPosition: camera.position,
-          tanHalfFovX: tanHalfFovX,
-          tanHalfFovY: tanHalfFovY,
-          far: perspectiveCamera.far,
-          near: perspectiveCamera.near,
+          projection: projection,
           currentJitterNdc: currentJitterNdc,
           previousJitterNdc: prevJitterNdc,
         ),
@@ -2820,7 +3121,7 @@ base class Scene implements SceneGraph {
     // depth of field and the custom effects republish the scene color and
     // before bloom (bloom feeds off the exposure-independent HDR color and
     // its own contribution should not drive the metering).
-    if (autoExposure.enabled) {
+    if (autoExposure.enabled && !debugActive) {
       graph.addPass(
         AutoExposurePass(
           settings: autoExposure,
@@ -2832,7 +3133,7 @@ base class Scene implements SceneGraph {
     }
 
     // Bloom runs in HDR before the resolve, which composites it back in.
-    if (postProcess.bloom.enabled) {
+    if (postProcess.bloom.enabled && !debugActive) {
       graph.addPass(
         BloomPass(dimensions: pixelSize, settings: postProcess.bloom),
       );
@@ -2867,6 +3168,9 @@ base class Scene implements SceneGraph {
         agxWhite: agxWhite,
         agxContrast: agxContrast,
         postProcess: postProcess,
+        debugViewActive: debugFrame?.anyViewActive ?? false,
+        debugViewSplit: debugActive ? (debug.split ?? -1.0) : -1.0,
+        debugSkipsPost: debugActive,
       ),
     );
 
@@ -2994,7 +3298,32 @@ base class Scene implements SceneGraph {
       transientsBuffer: transientsBuffer,
       texturePool: pool,
       observer: capturer,
+      stats: viewStats,
     );
+    _finishViewStats(viewStats, viewWatch);
+  }
+
+  // Closes a view's stats scope: its CPU time and its counter totals summed
+  // over the passes it ran.
+  static void _finishViewStats(RenderViewStats? stats, Stopwatch? watch) {
+    if (stats == null || watch == null) return;
+    watch.stop();
+    stats.cpuMicros = watch.elapsedMicroseconds;
+    final total = stats.counters;
+    for (final pass in stats.passes) {
+      final c = pass.counters;
+      total.draws += c.draws;
+      total.instances += c.instances;
+      total.vertices += c.vertices;
+      total.submitted += c.submitted;
+      total.culled += c.culled;
+      total.layerMasked += c.layerMasked;
+      total.pipelineRejected += c.pipelineRejected;
+      total.pipelineBinds += c.pipelineBinds;
+      total.pipelineBuilds += c.pipelineBuilds;
+      total.batches += c.batches;
+      total.batchedItems += c.batchedItems;
+    }
   }
 
   // Places the irradiance volume for this frame, adds the scatter, blend, and
@@ -3007,7 +3336,7 @@ base class Scene implements SceneGraph {
     required Vector3 cameraForward,
     required Vector3 cameraRight,
     required Vector3 cameraUp,
-    required PerspectiveProjection perspectiveCamera,
+    required ProjectionParams projection,
     required EnvironmentMap environmentMap,
   }) {
     final settings = globalIllumination;
@@ -3049,13 +3378,7 @@ base class Scene implements SceneGraph {
           cameraRight: cameraRight,
           cameraUp: cameraUp,
           cameraForward: cameraForward,
-          tanHalfFovX:
-              math.tan(perspectiveCamera.fovRadiansY * 0.5) *
-              (pixelSize.height <= 0
-                  ? 1.0
-                  : pixelSize.width / pixelSize.height),
-          tanHalfFovY: math.tan(perspectiveCamera.fovRadiansY * 0.5),
-          far: perspectiveCamera.far,
+          projection: projection,
           sceneRadiance: _ssgiHistoryColor,
         ),
       );
@@ -3253,4 +3576,8 @@ class _PlanarCaptureResources {
     }
     return texture;
   }
+}
+
+class _RepaintRequest extends ChangeNotifier {
+  void notify() => notifyListeners();
 }

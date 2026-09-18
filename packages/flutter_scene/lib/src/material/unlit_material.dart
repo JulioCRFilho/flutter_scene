@@ -22,6 +22,9 @@ import 'package:flutter_scene/src/render/frame_transients.dart';
 /// Wraps the `UnlitFragment` shader from the base shader library.
 /// {@category Materials}
 class UnlitMaterial extends Material {
+  @override
+  bool get participatesInDebugViews => true;
+
   /// Creates an [UnlitMaterial], optionally textured.
   ///
   /// When [colorTexture] is null a 1×1 white placeholder is used so the
@@ -112,6 +115,12 @@ class UnlitMaterial extends Material {
     );
     // The unlit shader carries the FogInfo block (fog.glsl) too.
     EngineLightingUniforms.bindFog(
+      pass,
+      fragmentShader,
+      transientsBuffer,
+      lighting,
+    );
+    EngineLightingUniforms.bindViewInfo(
       pass,
       fragmentShader,
       transientsBuffer,

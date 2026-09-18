@@ -1,5 +1,27 @@
 ## 0.24.0
 
+* `OrthographicCamera` and `OrthographicProjection` add parallel projection, sized by `OrthographicSize` (full world extents with height, width, contain, cover, or stretch fitting, or a fixed `pixelsPerUnit`) plus `zoom`, `offset`, and a `near` that may be negative.
+* `CameraProjection.getProjectionMatrixForViewport` lets a projection size its volume from the view's logical size, which rendering and picking both resolve against.
+* Shadows, AO, SSR, TAA, depth of field, god rays, GI, planar reflections, froxel lighting, LOD, and custom-pass depth/normals all work under orthographic and custom projections.
+* `#include <view_projection.glsl>` reconstructs view positions for any projection; `PostCameraInfo` carries its axis offset and orthographic flag in the formerly unused `w` slots.
+* `.fscene` cameras serialize orthographic projections, the editor draws their view volume, and `OrbitCameraController` dollies an orthographic camera by zoom.
+* Gaussian splats sort back to front and evaluate view-dependent color under orthographic cameras.
+* BREAKING: `Lighting` takes `projectionScaleX/Y`, `projectionOffsetX/Y`, and `orthographic` in place of `tanHalfFovX/Y`, which remain as deprecated getters.
+* Screen-size LOD applies to every perspective camera, not only `PerspectiveCamera`.
+* Update `flutter_scene-idioms` (v9) and `flutter_scene-looks` (v5) skills with orthographic cameras.
+* `Scene.addTickListener` runs a `SceneTickListener` at the start of every tick and before every fixed step, ahead of all components, for per-frame sampling such as input.
+* `FlyCameraController.setMoveInput` drives movement from a gamepad, touch controls, or an input system, summing with the keys and keeping analog magnitude.
+* Cascaded shadows skip casters that cannot shadow anything the camera shades, cutting shadow-pass draws with no change to the rendered image.
+* `releaseTransientRenderTargets()` drops the render graph's pooled attachments (shadow atlas, scene color, depth, the post-process chain) and returns the bytes released; they reallocate on the next frame that needs them.
+* Pooled render targets are released automatically on platform memory pressure (`releaseRenderTargetsOnMemoryPressure` turns that off), and `takeMemoryReport()` reports them as a `render targets` category.
+* Surface debug views. `Scene.debug.view` shows a resolved material channel (base color, roughness, metallic, every physical field), a geometry attribute (normals, tangents, UV sets, vertex color, face orientation, UV checkers), an identity color per object or material, or a validation flag (NaN/Inf, albedo range, non-binary metallic, missing tangents, UV range) in place of the lit result, on every material including `.fmat` ones, at runtime in any build. `Scene.debug.split` compares a view against the lit image, `DebugView` carries a range, gain, and out-of-range policy, `Node.debugView` overrides or excludes a subtree, and `Scene.debug.overlays` adds a wireframe drawn through each mesh's own vertex path. `DebugViewRegistry` lists the views by id for tools; a `.fmat` shows any value through `material.debug` and the `custom` channel.
+* `GeometryBufferArena` fills the first block with room instead of abandoning a block's tail once an upload does not fit, and its docs now say it never reclaims space.
+* `DebugDraw.flushInto` rebuilds one updatable line geometry in place each frame (`DebugDraw.createGeometry` makes it) instead of allocating a geometry per flush; the `flutter_scene-kit` skill (v5) and the Kit example use it.
+* `Scene.renderStats` reports every frame's draw, instance, vertex, culling, batching, and pipeline counters per view and per pass with CPU times, plus a bounded history; the render graph also emits a `dart:developer` timeline event per pass for DevTools.
+* `ShaderReflection` parses any loaded shader bundle into per-shader, per-backend reflection (inputs, uniform block layouts, texture bindings, entrypoint) and the compiled source for every backend it holds, maps shader objects back to their names, and decodes packed uniform bytes through the layout.
+* A render graph capture now records every draw call (`CapturedDraw`, with node, material, shader pair, pipeline, counts, batch size, why an opaque run ended, and the uniform blocks bound for it) and every skipped item with its reason.
+* `RenderGraphCaptureResult.toJson` and `fromJson` serialize a capture with PNG thumbnails and decoded uniforms, so a capture can be attached to a bug report and opened elsewhere.
+* `.fmat` compile failures expose parsed diagnostics (`FmatCompileException.diagnostics`) with line numbers, and `shaderSourceWindow` renders the marked source around one.
 * Projected box decals via `DecalNode`, an oriented projection volume that paints a `.fmat` material onto whatever opaque surfaces it intersects (scorch marks, splats), with no mesh work at the impact site.
 * Radial screen distortion pulses via `Scene.screenDistortion`, expanding shockwave rings that warp the composed image with optional chromatic fringing.
 * `.fmat` materials accept `blending: additive` alongside `opaque`/`alpha`, and `depth_write`/`depth_test` configure the translucent depth state.
@@ -16,7 +38,14 @@
 * `Scene.smaa` (`SmaaSettings`) tunes SMAA's edge threshold, search steps, and corner rounding at runtime, previously compile-time constants.
 * `.fscene` stage effects now apply and serialize temporal anti-aliasing tuning and SMAA quality (the fields previously round-tripped through documents without reaching the scene).
 * Update `flutter_scene-idioms` skill (v5) with point light shadows and the runtime SMAA/TAA tuning surface.
+* Switching `Scene.antiAliasingMode` from `msaa` to another mode on the OpenGL ES backend no longer renders without a depth test (far surfaces drew over near ones); pooled color targets now keep a separate texture per depth attachment setup.
+* `Scene.renderQuality` (`RenderQualitySettings`) puts the automatic settings on a quality ladder: `AntiAliasingMode.auto` and the scene color capture budget follow the tier (web and Linux desktop start at medium, everything else at high), and `adaptive` lowers the render scale and then the tier from measured frame periods when frames overrun `targetFrameRate`, recovering when they keep it. `Scene.effectiveRenderQualityTier` and `Scene.adaptiveRenderScale` report what is in effect.
+* `Scene.sceneColorCaptureBatches` caps how many scene color captures a frame opens for overlapping transmissive readers (1 makes them all share one snapshot), the biggest lever on tiled and low-end GPUs; null follows the quality tier.
+* Smooth transmission (zero roughness, or an index of refraction of 1) no longer builds the rough-transmission filter pyramid every capture, which the shader never sampled.
+* Material fragment shaders default to mediump with explicit highp on positions, coordinates, depth, and the HDR accumulators (see `shaders/PRECISION.md`), so GPUs that run half precision faster (Mali, Adreno, the web) shade the standard and physical materials at their fp16 rate. Metal is unaffected. A `.fmat` body inherits the default and should declare `highp` on positions or coordinates it computes itself; `noise.glsl` runs in highp regardless, since its parity with the Dart port is a float32 contract.
+* `Scene.maxGpuFramesInFlight` paces the GPU: once that many frames of GPU work are still running, a screen view presents its previous image instead of encoding a new frame, so a GPU-bound scene no longer stalls the UI thread on the Vulkan and Metal backends, which queue work from the calling thread. The default of 1 keeps the UI thread free for about a tenth of GPU throughput; 2 keeps the throughput but only halves the stall. `Scene.pacedFrameCount` counts the frames it held, and `Scene.repaintRequested` notifies when the held frame can be painted, so a view that repaints only on demand still shows it (`SceneView` listens).
 * `ThirdPersonControllerComponent.rotatesToMovement` keeps the node's authored rotation while still moving it, and `yaw` exposes the smoothed heading, now seeded from the node's rotation instead of snapping to zero on the first step. The `flutter_scene-kit` skill (v4) covers it.
+* `DebugDraw.colliders` wireframes every physics collider in a node subtree, posed the way the simulation sees it, and `DebugDraw.shape` draws one `Shape` at a given transform. Triggers draw in their own color. The `flutter_scene-kit` skill (v6) covers it.
 
 * `SceneView` measures `onTick` deltas with a wall clock instead of the ticker's frame-begin timestamps, whose deltas alternate between tiny and double-length values under GPU load and stagger any motion integrated against them. The new `SceneView.clock` injects a clock for tests and time-controlling drivers; the ambient `package:clock` clock (faked under `flutter_test`) is the default.
 * `Scene.punctualLightOverflowCount` reports how many drawable items dropped punctual lights last frame because more lights reached them than the per-object budget shades.
@@ -27,6 +56,10 @@
 * BREAKING: `Scene.initializeStaticResources()` completes with its error instead of normally, so a failed shader-bundle or material load now reaches the caller rather than only `dart:developer` `log()` (which web never showed). Awaiting it without a `try`/`catch` throws where it previously continued; wrap the call, or use a `SceneView`, which reports the failure and stays on its `loadingBuilder`. `baseShaderLibrary` names that cause too, rather than telling you to await the call that already failed.
 * A rejected collider names the node it was on and the degenerate cases that cause the rejection.
 * Batching comparators cache their identity keys, `sceneSortDepth` allocates nothing, and instance batch objects are pooled, cutting per-frame work that multiplies across shadow, depth-prepass, and reflection views.
+* Allow `code_assets` 2.x.
+* Fix vertex-attribute traffic on the web backend growing quadratically across same-pipeline draws.
+* On web, shader bundles and their generated JSON revalidate with the server on load, so a browser cache can no longer pair a previous build's bundle with new Dart code.
+* Spatial audio follows a `SceneView`'s camera (or `cameraBuilder`) when no scene camera or `AudioListener` is set, instead of a listener stuck at the origin.
 
 ## 0.23.0
 
