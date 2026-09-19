@@ -562,10 +562,16 @@ class _InlineNumberState extends State<_InlineNumber> {
     if (!_focus.hasFocus) _commit();
   }
 
-  void _commit() {
+  void _commit({bool unfocus = false}) {
+    if (unfocus) _focus.unfocus();
     if (_ctrl.text == widget.value.toStringAsFixed(3)) return;
     final v = double.tryParse(_ctrl.text);
-    if (v != null && v.isFinite) widget.onChanged(v);
+    if (v != null && v.isFinite) {
+      _ctrl.text = v.toStringAsFixed(3);
+      widget.onChanged(v);
+    } else {
+      _ctrl.text = widget.value.toStringAsFixed(3);
+    }
   }
 
   @override
@@ -578,7 +584,9 @@ class _InlineNumberState extends State<_InlineNumber> {
 
   @override
   void dispose() {
-    _focus.dispose();
+    _focus
+      ..removeListener(_onFocus)
+      ..dispose();
     _ctrl.dispose();
     super.dispose();
   }
@@ -613,7 +621,8 @@ class _InlineNumberState extends State<_InlineNumber> {
                   ),
                   border: OutlineInputBorder(),
                 ),
-                onSubmitted: (_) => _commit(),
+                onSubmitted: (_) => _commit(unfocus: true),
+                onTapOutside: (_) => _commit(unfocus: true),
               ),
             ),
           ),

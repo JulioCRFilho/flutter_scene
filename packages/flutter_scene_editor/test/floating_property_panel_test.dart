@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_scene/scene.dart';
 import 'package:flutter_scene_editor/src/controller/editor_controller.dart';
 import 'package:flutter_scene_editor/src/inspector/live_fields.dart';

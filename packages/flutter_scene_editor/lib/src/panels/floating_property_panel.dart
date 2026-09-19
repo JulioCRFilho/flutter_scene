@@ -252,9 +252,16 @@ class _FloatingPropertyPanelState extends State<FloatingPropertyPanel> {
               _buildHeader(context),
               const Divider(height: 1, color: editorLineColor),
               Flexible(
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  child: _buildBody(context),
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onTap: () => FocusScope.of(context).unfocus(),
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
+                    child: _buildBody(context),
+                  ),
                 ),
               ),
             ],

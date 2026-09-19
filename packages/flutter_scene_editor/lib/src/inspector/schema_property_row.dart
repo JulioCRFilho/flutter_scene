@@ -1005,6 +1005,7 @@ class MiniNumber extends StatefulWidget {
 class _MiniNumberState extends State<MiniNumber> {
   late final TextEditingController _ctrl;
   late final FocusNode _focus;
+  String? _lastCommittedText;
 
   @override
   void initState() {
@@ -1019,21 +1020,34 @@ class _MiniNumberState extends State<MiniNumber> {
 
   void _commit() {
     if (_ctrl.text == widget.value.toStringAsFixed(2)) return;
+    if (_ctrl.text == _lastCommittedText) return;
     final v = double.tryParse(_ctrl.text);
-    if (v != null && v.isFinite) widget.onSubmit(v);
-  }
-
-  @override
-  void didUpdateWidget(MiniNumber old) {
-    super.didUpdateWidget(old);
-    if (old.value != widget.value && !_focus.hasFocus) {
+    if (v != null && v.isFinite) {
+      final formatted = v.toStringAsFixed(2);
+      _ctrl.text = formatted;
+      _lastCommittedText = formatted;
+      widget.onSubmit(v);
+    } else {
       _ctrl.text = widget.value.toStringAsFixed(2);
     }
   }
 
   @override
+  void didUpdateWidget(MiniNumber old) {
+    super.didUpdateWidget(old);
+    if (old.value != widget.value) {
+      _lastCommittedText = null;
+      if (!_focus.hasFocus) {
+        _ctrl.text = widget.value.toStringAsFixed(2);
+      }
+    }
+  }
+
+  @override
   void dispose() {
-    _focus.dispose();
+    _focus
+      ..removeListener(_onFocusChange)
+      ..dispose();
     _ctrl.dispose();
     super.dispose();
   }
@@ -1059,7 +1073,10 @@ class _MiniNumberState extends State<MiniNumber> {
                 decimal: true,
                 signed: true,
               ),
-              onSubmit: (_) => _commit(),
+              onSubmit: (_) => _focus.unfocus(),
+              onTapOutside: (_) {
+                if (_focus.hasFocus) _focus.unfocus();
+              },
             ),
           ),
         ],
@@ -1091,6 +1108,7 @@ class StringRow extends StatefulWidget {
 class _StringRowState extends State<StringRow> {
   late TextEditingController _ctrl;
   late final FocusNode _focus;
+  String? _lastCommittedText;
 
   @override
   void initState() {
@@ -1104,25 +1122,37 @@ class _StringRowState extends State<StringRow> {
   }
 
   void _commit() {
+    if (_ctrl.text == _lastCommittedText) return;
     // Skip a no-op edit when the text is unchanged (or still the mixed dash).
     if (widget.mixed) {
-      if (_ctrl.text.isNotEmpty) widget.onSubmit(_ctrl.text);
+      if (_ctrl.text.isNotEmpty) {
+        _lastCommittedText = _ctrl.text;
+        widget.onSubmit(_ctrl.text);
+      }
       return;
     }
-    if (_ctrl.text != widget.value) widget.onSubmit(_ctrl.text);
+    if (_ctrl.text != widget.value) {
+      _lastCommittedText = _ctrl.text;
+      widget.onSubmit(_ctrl.text);
+    }
   }
 
   @override
   void didUpdateWidget(StringRow old) {
     super.didUpdateWidget(old);
-    if (old.value != widget.value && !_focus.hasFocus) {
-      _ctrl.text = widget.value;
+    if (old.value != widget.value) {
+      _lastCommittedText = null;
+      if (!_focus.hasFocus) {
+        _ctrl.text = widget.value;
+      }
     }
   }
 
   @override
   void dispose() {
-    _focus.dispose();
+    _focus
+      ..removeListener(_onFocusChange)
+      ..dispose();
     _ctrl.dispose();
     super.dispose();
   }
@@ -1148,7 +1178,10 @@ class _StringRowState extends State<StringRow> {
               focusNode: _focus,
               size: FTextFieldSizeVariant.sm,
               hint: widget.mixed ? '\u2014' : null,
-              onSubmit: (_) => _commit(),
+              onSubmit: (_) => _focus.unfocus(),
+              onTapOutside: (_) {
+                if (_focus.hasFocus) _focus.unfocus();
+              },
             ),
           ),
         ],
@@ -1224,6 +1257,7 @@ class IntRow extends StatefulWidget {
 class _IntRowState extends State<IntRow> {
   late TextEditingController _ctrl;
   late final FocusNode _focus;
+  String? _lastCommittedText;
 
   @override
   void initState() {
@@ -1241,21 +1275,36 @@ class _IntRowState extends State<IntRow> {
   void _commit() {
     // Skip a no-op edit when the text matches the current value.
     if (_ctrl.text == widget.value.toString()) return;
+    if (_ctrl.text == _lastCommittedText) return;
     final v = int.tryParse(_ctrl.text);
-    if (v != null) widget.onSubmit(v);
-  }
-
-  @override
-  void didUpdateWidget(IntRow old) {
-    super.didUpdateWidget(old);
-    if (old.value != widget.value && !_focus.hasFocus) {
+    if (v != null) {
+      final formatted = v.toString();
+      if (!widget.mixed) {
+        _ctrl.text = formatted;
+      }
+      _lastCommittedText = formatted;
+      widget.onSubmit(v);
+    } else if (!widget.mixed) {
       _ctrl.text = widget.value.toString();
     }
   }
 
   @override
+  void didUpdateWidget(IntRow old) {
+    super.didUpdateWidget(old);
+    if (old.value != widget.value) {
+      _lastCommittedText = null;
+      if (!_focus.hasFocus) {
+        _ctrl.text = widget.value.toString();
+      }
+    }
+  }
+
+  @override
   void dispose() {
-    _focus.dispose();
+    _focus
+      ..removeListener(_onFocusChange)
+      ..dispose();
     _ctrl.dispose();
     super.dispose();
   }
@@ -1281,7 +1330,10 @@ class _IntRowState extends State<IntRow> {
               focusNode: _focus,
               size: FTextFieldSizeVariant.sm,
               keyboardType: const TextInputType.numberWithOptions(signed: true),
-              onSubmit: (_) => _commit(),
+              onSubmit: (_) => _focus.unfocus(),
+              onTapOutside: (_) {
+                if (_focus.hasFocus) _focus.unfocus();
+              },
             ),
           ),
         ],
@@ -1312,6 +1364,7 @@ class DoubleRow extends StatefulWidget {
 class _DoubleRowState extends State<DoubleRow> {
   late TextEditingController _ctrl;
   late final FocusNode _focus;
+  String? _lastCommittedText;
 
   @override
   void initState() {
@@ -1329,21 +1382,36 @@ class _DoubleRowState extends State<DoubleRow> {
   void _commit() {
     // Skip when the text still matches the current value's canonical rendering.
     if (_ctrl.text == widget.value.toStringAsFixed(3)) return;
+    if (_ctrl.text == _lastCommittedText) return;
     final v = double.tryParse(_ctrl.text);
-    if (v != null && v.isFinite) widget.onSubmit(v);
-  }
-
-  @override
-  void didUpdateWidget(DoubleRow old) {
-    super.didUpdateWidget(old);
-    if (old.value != widget.value && !_focus.hasFocus) {
+    if (v != null && v.isFinite) {
+      final formatted = v.toStringAsFixed(3);
+      if (!widget.mixed) {
+        _ctrl.text = formatted;
+      }
+      _lastCommittedText = formatted;
+      widget.onSubmit(v);
+    } else if (!widget.mixed) {
       _ctrl.text = widget.value.toStringAsFixed(3);
     }
   }
 
   @override
+  void didUpdateWidget(DoubleRow old) {
+    super.didUpdateWidget(old);
+    if (old.value != widget.value) {
+      _lastCommittedText = null;
+      if (!_focus.hasFocus) {
+        _ctrl.text = widget.value.toStringAsFixed(3);
+      }
+    }
+  }
+
+  @override
   void dispose() {
-    _focus.dispose();
+    _focus
+      ..removeListener(_onFocusChange)
+      ..dispose();
     _ctrl.dispose();
     super.dispose();
   }
@@ -1372,7 +1440,10 @@ class _DoubleRowState extends State<DoubleRow> {
                 decimal: true,
                 signed: true,
               ),
-              onSubmit: (_) => _commit(),
+              onSubmit: (_) => _focus.unfocus(),
+              onTapOutside: (_) {
+                if (_focus.hasFocus) _focus.unfocus();
+              },
             ),
           ),
         ],

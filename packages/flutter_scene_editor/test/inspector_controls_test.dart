@@ -5,10 +5,11 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_scene_editor/src/assets/environment_thumbnail.dart';
 import 'package:flutter_scene_editor/src/inspector/live_fields.dart';
-import 'package:flutter_scene_editor/src/panels/inspector_panel.dart';
 import 'package:flutter_scene_editor/src/inspector/particle_value_editors.dart';
 import 'package:flutter_scene_editor/src/inspector/property_editors.dart';
+import 'package:flutter_scene_editor/src/inspector/schema_property_row.dart';
 import 'package:flutter_scene_editor/src/shell/editor_theme.dart';
+import 'package:flutter_scene_editor_core/flutter_scene_editor_core.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
 import 'package:scene/scene.dart';
@@ -477,6 +478,281 @@ void main() {
       expect(previewed, isA<MapValue>());
     },
   );
+
+  testWidgets('DoubleRow commits on Enter and unfocuses', (tester) async {
+    final commits = <double>[];
+    await tester.pumpWidget(
+      themed(
+        DoubleRow(
+          label: 'Roughness',
+          value: 0.5,
+          onSubmit: commits.add,
+        ),
+      ),
+    );
+
+    expect(find.text('0.500'), findsOneWidget);
+    await tester.tap(find.byType(DoubleRow));
+    await tester.pump();
+
+    final editable = tester.widget<EditableText>(find.byType(EditableText));
+    editable.controller.text = '0.75';
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+
+    expect(commits, [0.75]);
+    expect(find.text('0.750'), findsOneWidget);
+    final focus = tester.binding.focusManager.primaryFocus;
+    expect(focus?.context?.widget is EditableText, isFalse);
+  });
+
+  testWidgets('DoubleRow commits on tap outside without selection change', (
+    tester,
+  ) async {
+    final commits = <double>[];
+    await tester.pumpWidget(
+      themed(
+        Column(
+          children: [
+            DoubleRow(
+              label: 'Roughness',
+              value: 0.5,
+              onSubmit: commits.add,
+            ),
+            Container(
+              key: const ValueKey('outside'),
+              height: 50,
+              width: 200,
+              color: Colors.blue,
+            ),
+          ],
+        ),
+      ),
+    );
+
+    await tester.tap(find.byType(DoubleRow));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(EditableText), '0.25');
+    await tester.pump();
+    expect(commits, isEmpty);
+
+    await tester.tap(find.byKey(const ValueKey('outside')));
+    await tester.pumpAndSettle();
+
+    expect(commits, [0.25]);
+    expect(find.text('0.250'), findsOneWidget);
+    final focus = tester.binding.focusManager.primaryFocus;
+    expect(focus?.context?.widget is EditableText, isFalse);
+  });
+
+  testWidgets('DoubleRow reverts invalid text on submit or tap outside', (
+    tester,
+  ) async {
+    final commits = <double>[];
+    await tester.pumpWidget(
+      themed(
+        DoubleRow(
+          label: 'Roughness',
+          value: 0.5,
+          onSubmit: commits.add,
+        ),
+      ),
+    );
+
+    await tester.tap(find.byType(DoubleRow));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(EditableText), 'invalid_number');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    expect(commits, isEmpty);
+    expect(find.text('0.500'), findsOneWidget);
+  });
+
+  testWidgets('IntRow commits on tap outside and Enter', (tester) async {
+    final commits = <int>[];
+    await tester.pumpWidget(
+      themed(
+        Column(
+          children: [
+            IntRow(
+              label: 'Count',
+              value: 10,
+              onSubmit: commits.add,
+            ),
+            Container(
+              key: const ValueKey('outside'),
+              height: 50,
+              width: 200,
+              color: Colors.blue,
+            ),
+          ],
+        ),
+      ),
+    );
+
+    await tester.tap(find.byType(IntRow));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(EditableText), '42');
+    await tester.pump();
+    expect(commits, isEmpty);
+
+    await tester.tap(find.byKey(const ValueKey('outside')));
+    await tester.pumpAndSettle();
+
+    expect(commits, [42]);
+    expect(find.text('42'), findsOneWidget);
+    final focus = tester.binding.focusManager.primaryFocus;
+    expect(focus?.context?.widget is EditableText, isFalse);
+  });
+
+  testWidgets('StringRow commits on tap outside and Enter', (tester) async {
+    final commits = <String>[];
+    await tester.pumpWidget(
+      themed(
+        Column(
+          children: [
+            StringRow(
+              label: 'Name',
+              value: 'OldName',
+              onSubmit: commits.add,
+            ),
+            Container(
+              key: const ValueKey('outside'),
+              height: 50,
+              width: 200,
+              color: Colors.blue,
+            ),
+          ],
+        ),
+      ),
+    );
+
+    await tester.tap(find.byType(StringRow));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(EditableText), 'NewName');
+    await tester.pump();
+    expect(commits, isEmpty);
+
+    await tester.tap(find.byKey(const ValueKey('outside')));
+    await tester.pumpAndSettle();
+
+    expect(commits, ['NewName']);
+    expect(find.text('NewName'), findsOneWidget);
+    final focus = tester.binding.focusManager.primaryFocus;
+    expect(focus?.context?.widget is EditableText, isFalse);
+  });
+
+  testWidgets(
+    'ScrubbableNumberField commits and exits edit mode on tap outside',
+    (tester) async {
+      final commits = <double>[];
+      await tester.pumpWidget(
+        themed(
+          Column(
+            children: [
+              ScrubbableNumberField(
+                label: 'X',
+                color: Colors.blue,
+                value: 1.0,
+                scrubStep: 0.01,
+                snapStep: 1.0,
+                onCommit: commits.add,
+                enableInfiniteDrag: false,
+              ),
+              Container(
+                key: const ValueKey('outside'),
+                height: 50,
+                width: 200,
+                color: Colors.blue,
+              ),
+            ],
+          ),
+        ),
+      );
+
+      await tester.tap(find.byType(ScrubbableNumberField));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(EditableText), findsOneWidget);
+      await tester.enterText(find.byType(EditableText), '5.5');
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('outside')));
+      await tester.pumpAndSettle();
+
+      expect(commits, [5.5]);
+      expect(find.byType(EditableText), findsNothing);
+      expect(find.text('5.500'), findsOneWidget);
+    },
+  );
+
+  testWidgets('PropertyField string and number commit on tap outside', (
+    tester,
+  ) async {
+    final stringCommits = <Object?>[];
+    final numberCommits = <Object?>[];
+    await tester.pumpWidget(
+      themed(
+        Column(
+          children: [
+            PropertyField(
+              descriptor: const UiFieldDescriptor(
+                field: 'name',
+                label: 'Title',
+                description: '',
+                required: false,
+                type: ParamType.string,
+              ),
+              currentValue: const StringValue('Hello'),
+              onChanged: stringCommits.add,
+            ),
+            PropertyField(
+              descriptor: const UiFieldDescriptor(
+                field: 'amount',
+                label: 'Amount',
+                description: '',
+                required: false,
+                type: ParamType.number,
+              ),
+              currentValue: const DoubleValue(3.0),
+              onChanged: numberCommits.add,
+            ),
+            Container(
+              key: const ValueKey('outside'),
+              height: 50,
+              width: 200,
+              color: Colors.blue,
+            ),
+          ],
+        ),
+      ),
+    );
+
+    // Edit string field
+    await tester.tap(find.widgetWithText(PropertyField, 'Title'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(EditableText).first, 'World');
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('outside')));
+    await tester.pumpAndSettle();
+    expect(stringCommits, ['World']);
+
+    // Edit number field
+    await tester.tap(find.widgetWithText(PropertyField, 'Amount'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(EditableText).last, '7.5');
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('outside')));
+    await tester.pumpAndSettle();
+    expect(numberCommits, [7.5]);
+  });
 }
 
 class _AccordionRebuildHarness extends StatefulWidget {

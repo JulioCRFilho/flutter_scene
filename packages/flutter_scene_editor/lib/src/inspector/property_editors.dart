@@ -112,23 +112,43 @@ class _StringField extends StatefulWidget {
 
 class _StringFieldState extends State<_StringField> {
   late final TextEditingController _ctrl;
+  late final FocusNode _focus;
+  String? _lastCommittedText;
 
   @override
   void initState() {
     super.initState();
     _ctrl = TextEditingController(text: widget.initial);
+    _focus = FocusNode()..addListener(_onFocusChange);
+  }
+
+  void _onFocusChange() {
+    if (!_focus.hasFocus) _commit();
+  }
+
+  void _commit() {
+    if (_ctrl.text == widget.initial) return;
+    if (_ctrl.text == _lastCommittedText) return;
+    _lastCommittedText = _ctrl.text;
+    widget.onSubmit(_ctrl.text);
   }
 
   @override
   void didUpdateWidget(_StringField oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.initial != widget.initial && !_ctrl.text.contains('\n')) {
-      _ctrl.text = widget.initial;
+    if (oldWidget.initial != widget.initial) {
+      _lastCommittedText = null;
+      if (!_focus.hasFocus) {
+        _ctrl.text = widget.initial;
+      }
     }
   }
 
   @override
   void dispose() {
+    _focus
+      ..removeListener(_onFocusChange)
+      ..dispose();
     _ctrl.dispose();
     super.dispose();
   }
@@ -151,8 +171,12 @@ class _StringFieldState extends State<_StringField> {
           Expanded(
             child: FTextField(
               control: FTextFieldControl.managed(controller: _ctrl),
+              focusNode: _focus,
               size: FTextFieldSizeVariant.sm,
-              onSubmit: widget.onSubmit,
+              onSubmit: (_) => _focus.unfocus(),
+              onTapOutside: (_) {
+                if (_focus.hasFocus) _focus.unfocus();
+              },
             ),
           ),
         ],
@@ -211,6 +235,8 @@ class _NumberField extends StatefulWidget {
 
 class _NumberFieldState extends State<_NumberField> {
   late final TextEditingController _ctrl;
+  late final FocusNode _focus;
+  String? _lastCommittedText;
 
   @override
   void initState() {
@@ -220,34 +246,63 @@ class _NumberFieldState extends State<_NumberField> {
           ? widget.initial.toInt().toString()
           : widget.initial.toStringAsFixed(3),
     );
+    _focus = FocusNode()..addListener(_onFocusChange);
+  }
+
+  void _onFocusChange() {
+    if (!_focus.hasFocus) _commit();
+  }
+
+  void _commit() {
+    final text = _ctrl.text;
+    if (text == _lastCommittedText) return;
+    if (widget.isInt) {
+      final v = int.tryParse(text);
+      if (v != null) {
+        final formatted = v.toString();
+        _ctrl.text = formatted;
+        _lastCommittedText = formatted;
+        if (v != widget.initial.toInt()) {
+          widget.onSubmit(v);
+        }
+      } else {
+        _ctrl.text = widget.initial.toInt().toString();
+      }
+    } else {
+      final v = double.tryParse(text);
+      if (v != null && v.isFinite) {
+        final formatted = v.toStringAsFixed(3);
+        _ctrl.text = formatted;
+        _lastCommittedText = formatted;
+        if (v != widget.initial) {
+          widget.onSubmit(v);
+        }
+      } else {
+        _ctrl.text = widget.initial.toStringAsFixed(3);
+      }
+    }
   }
 
   @override
   void didUpdateWidget(_NumberField oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.initial != widget.initial) {
-      _ctrl.text = widget.isInt
-          ? widget.initial.toInt().toString()
-          : widget.initial.toStringAsFixed(3);
+      _lastCommittedText = null;
+      if (!_focus.hasFocus) {
+        _ctrl.text = widget.isInt
+            ? widget.initial.toInt().toString()
+            : widget.initial.toStringAsFixed(3);
+      }
     }
   }
 
   @override
   void dispose() {
+    _focus
+      ..removeListener(_onFocusChange)
+      ..dispose();
     _ctrl.dispose();
     super.dispose();
-  }
-
-  void _submit(String text) {
-    if (widget.isInt) {
-      final v = int.tryParse(text);
-      if (v != null) widget.onSubmit(v);
-    } else {
-      // tryParse accepts "NaN"/"Infinity"/overflow; a non-finite value would
-      // poison the document (canonical JSON refuses to encode it on save).
-      final v = double.tryParse(text);
-      if (v != null && v.isFinite) widget.onSubmit(v);
-    }
   }
 
   @override
@@ -268,12 +323,16 @@ class _NumberFieldState extends State<_NumberField> {
           Expanded(
             child: FTextField(
               control: FTextFieldControl.managed(controller: _ctrl),
+              focusNode: _focus,
               size: FTextFieldSizeVariant.sm,
               keyboardType: const TextInputType.numberWithOptions(
                 decimal: true,
                 signed: true,
               ),
-              onSubmit: _submit,
+              onSubmit: (_) => _focus.unfocus(),
+              onTapOutside: (_) {
+                if (_focus.hasFocus) _focus.unfocus();
+              },
             ),
           ),
         ],
@@ -534,6 +593,7 @@ class _ScrubbableNumberFieldState extends State<ScrubbableNumberField> {
 
   void _finishTextEditing({required bool commit}) {
     if (!_editing) return;
+    _textFocus.unfocus();
     // Reject "NaN"/"Infinity"/overflow, which tryParse accepts; a non-finite
     // value would poison the document (canonical JSON refuses it on save).
     final parsed = double.tryParse(_text.text);
@@ -748,6 +808,7 @@ class _ScrubbableNumberFieldState extends State<ScrubbableNumberField> {
                             ),
                           ),
                     onSubmit: (_) => _finishTextEditing(commit: true),
+                    onTapOutside: (_) => _finishTextEditing(commit: true),
                   )
                 : Semantics(
                     label: widget.label.isEmpty

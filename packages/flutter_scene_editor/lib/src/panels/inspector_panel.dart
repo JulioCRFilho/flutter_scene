@@ -98,15 +98,19 @@ class InspectorPanel extends StatelessWidget {
               if (id != primary)
                 if (controller.displayNode(id) case final node?) node,
           ];
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(
-                child: nodes.isEmpty
-                    ? StageSection(controller: controller)
-                    : _NodeInspector(nodes: nodes, controller: controller),
-              ),
-            ],
+          return GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: () => FocusScope.of(context).unfocus(),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: nodes.isEmpty
+                      ? StageSection(controller: controller)
+                      : _NodeInspector(nodes: nodes, controller: controller),
+                ),
+              ],
+            ),
           );
         },
       ),
