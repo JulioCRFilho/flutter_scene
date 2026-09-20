@@ -1648,6 +1648,9 @@ void documentTests() {
       expect(names, contains('separate_mesh_islands'));
       expect(names, contains('split_mesh_selection'));
       expect(names, contains('slice_mesh_plane'));
+      expect(names, contains('slice_mesh_polyline'));
+      expect(names, contains('auto_split_mesh'));
+      expect(names, contains('separate_mesh_primitives'));
     });
 
     test('separate_mesh_islands and split_mesh_selection dispatch correctly', () async {
@@ -1837,6 +1840,204 @@ void documentTests() {
           'planePoint': [0.0, 0.0, 0.0],
           'planeNormal': [1.0, 0.0, 0.0],
         }),
+        throwsA(isA<ToolError>()),
+      );
+    });
+
+    test('slice_mesh_polyline dispatches correctly', () async {
+      final session = EditorSession(
+        SceneDocument(allocator: IdAllocator(session: 1)),
+      );
+      final doc = session.document;
+
+      const vertexCount = 4;
+      final soa = Float32List(vertexCount * 18);
+      // v0: (-2, 0, 0)
+      soa[0] = -2.0; soa[1] = 0.0; soa[2] = 0.0;
+      // v1: (-2, 0, 1)
+      soa[3] = -2.0; soa[4] = 0.0; soa[5] = 1.0;
+      // v2: (2, 0, 0)
+      soa[6] = 2.0; soa[7] = 0.0; soa[8] = 0.0;
+      // v3: (2, 0, 1)
+      soa[9] = 2.0; soa[10] = 0.0; soa[11] = 1.0;
+
+      final indices = Uint16List.fromList([0, 1, 2, 1, 3, 2]);
+
+      final vp = doc.addPayload(
+        PayloadSpec(
+          doc.newId(),
+          encoding: PayloadEncoding.vertexBuffer,
+          layout: 'unskinned_soa_uv1_tangent',
+          bytes: soa.buffer.asUint8List(),
+          length: soa.buffer.lengthInBytes,
+        ),
+      );
+      final ip = doc.addPayload(
+        PayloadSpec(
+          doc.newId(),
+          encoding: PayloadEncoding.indexBuffer,
+          format: 'uint16',
+          bytes: indices.buffer.asUint8List(),
+          length: indices.buffer.lengthInBytes,
+        ),
+      );
+      final geom = GeometryResource(
+        doc.newId(),
+        vertices: vp.id,
+        indices: ip.id,
+        legacyWinding: true,
+      );
+      doc.resources[geom.id] = geom;
+      final mat = MaterialResource(doc.newId(), type: 'physicallyBased');
+      doc.resources[mat.id] = mat;
+
+      final bread = doc.createNode(name: 'Cake', root: true);
+      bread.components.add(
+        ComponentSpec(
+          'mesh',
+          properties: {
+            'geometry': ResourceRefValue(geom.id),
+            'material': ResourceRefValue(mat.id),
+          },
+        ),
+      );
+
+      final surface = EditorToolSurface.of(session);
+
+      // Slice through x = 0 with polyline from (0, -2, 0) to (0, 2, 0), viewDir (0, 0, 1).
+      final sliceResult = await surface.dispatch('slice_mesh_polyline', {
+        'node': 'Cake',
+        'points': [
+          [0.0, -2.0, 0.0],
+          [0.0, 2.0, 0.0],
+        ],
+        'viewDirection': [0.0, 0.0, 1.0],
+        'partName': 'Cake_Piece',
+      });
+      expect(sliceResult['ok'], isTrue);
+      expect(sliceResult['applied'], 'Slice mesh by polyline');
+      expect((sliceResult['created'] as List).isNotEmpty, isTrue);
+
+      final cutNode = doc.nodes.values.firstWhere(
+        (n) => n.name == 'Cake_Piece',
+      );
+      expect(cutNode.components.any((c) => c.type == 'mesh'), isTrue);
+
+      // Error handling: invalid node.
+      expect(
+        () => surface.dispatch('slice_mesh_polyline', {
+          'node': 'NonExistent',
+          'points': [
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+          ],
+          'viewDirection': [0.0, 0.0, 1.0],
+        }),
+        throwsA(isA<ToolError>()),
+      );
+
+      // Error handling: fewer than 2 points.
+      expect(
+        () => surface.dispatch('slice_mesh_polyline', {
+          'node': 'Cake',
+          'points': [
+            [0.0, 0.0, 0.0],
+          ],
+          'viewDirection': [0.0, 0.0, 1.0],
+        }),
+        throwsA(isA<ToolError>()),
+      );
+    });
+
+    test('auto_split_mesh and separate_mesh_primitives dispatch correctly', () async {
+      final session = EditorSession(
+        SceneDocument(allocator: IdAllocator(session: 1)),
+      );
+      final doc = session.document;
+
+      // Build a 2-island mesh: quad 0 (verts 0..3) and quad 1 (verts 4..7)
+      const vertexCount = 8;
+      final soa = Float32List(vertexCount * 18);
+      for (var v = 0; v < 4; v++) {
+        soa[v * 3] = 0.0;
+        soa[v * 3 + 1] = 0.0;
+        soa[v * 3 + 2] = v.toDouble();
+      }
+      for (var v = 4; v < 8; v++) {
+        soa[v * 3] = 10.0;
+        soa[v * 3 + 1] = 0.0;
+        soa[v * 3 + 2] = (v - 4).toDouble();
+      }
+      final indices = Uint16List.fromList([
+        0, 1, 2, 0, 2, 3, // island 1
+        4, 5, 6, 4, 6, 7, // island 2
+      ]);
+
+      final vp = doc.addPayload(
+        PayloadSpec(
+          doc.newId(),
+          encoding: PayloadEncoding.vertexBuffer,
+          layout: 'unskinned_soa_uv1_tangent',
+          bytes: soa.buffer.asUint8List(),
+          length: soa.buffer.lengthInBytes,
+        ),
+      );
+      final ip = doc.addPayload(
+        PayloadSpec(
+          doc.newId(),
+          encoding: PayloadEncoding.indexBuffer,
+          format: 'uint16',
+          bytes: indices.buffer.asUint8List(),
+          length: indices.buffer.lengthInBytes,
+        ),
+      );
+      final geom = GeometryResource(
+        doc.newId(),
+        vertices: vp.id,
+        indices: ip.id,
+        legacyWinding: true,
+      );
+      doc.resources[geom.id] = geom;
+      final mat = MaterialResource(doc.newId(), type: 'physicallyBased');
+      doc.resources[mat.id] = mat;
+
+      final buildingNode = doc.createNode(name: 'Building', root: true);
+      buildingNode.components.add(
+        ComponentSpec(
+          'mesh',
+          properties: {
+            'geometry': ResourceRefValue(geom.id),
+            'material': ResourceRefValue(mat.id),
+          },
+        ),
+      );
+
+      final surface = EditorToolSurface.of(session);
+
+      // 1. Dispatch auto_split_mesh on the loose-parts mesh
+      final autoResult = await surface.dispatch('auto_split_mesh', {
+        'node': 'Building',
+      });
+      expect(autoResult['ok'], isTrue);
+      expect(autoResult['applied'], 'Auto-split mesh');
+      expect((autoResult['created'] as List).isNotEmpty, isTrue);
+
+      // 2. Error handling: invalid node
+      expect(
+        () => surface.dispatch('auto_split_mesh', {'node': 'NonExistent'}),
+        throwsA(isA<ToolError>()),
+      );
+
+      // 3. Error handling: node without mesh
+      final emptyNode = doc.createNode(name: 'EmptyNode', root: true);
+      expect(
+        () => surface.dispatch('auto_split_mesh', {'node': emptyNode.name}),
+        throwsA(isA<ToolError>()),
+      );
+
+      // 4. Test separate_mesh_primitives dispatch error on node without mesh
+      expect(
+        () => surface.dispatch('separate_mesh_primitives', {'node': emptyNode.name}),
         throwsA(isA<ToolError>()),
       );
     });

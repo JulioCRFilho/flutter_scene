@@ -269,6 +269,40 @@ mixin EditorControllerClipboard on EditorControllerBase {
     return null;
   }
 
+  /// Slices [nodeId]'s mesh along an extruded 3D polyline or closed polygon,
+  /// creating a twin sibling node containing the cut piece.
+  Future<LocalId?> sliceMeshByPolyline(
+    LocalId nodeId, {
+    required List<Vector3> points,
+    required Vector3 viewDirection,
+    bool isClosed = false,
+    int primitiveIndex = 0,
+    bool recenterPivot = true,
+    String? partName,
+  }) async {
+    final tx = await run('sliceMeshByPolyline', {
+      'nodeId': nodeId.toToken(),
+      'points': [
+        for (final p in points) [p.x, p.y, p.z],
+      ],
+      'viewDirection': [viewDirection.x, viewDirection.y, viewDirection.z],
+      'isClosed': isClosed,
+      'primitiveIndex': primitiveIndex,
+      'recenterPivot': recenterPivot,
+      if (partName != null) 'partName': partName,
+    });
+    for (final record in tx.records) {
+      if (record.slot == ChangeSlot.poolNode && record.oldValue is NodeChange) {
+        final nodeChange = record.newValue as NodeChange;
+        if (nodeChange.value != null) {
+          selection.selectOnly(nodeChange.value!.id);
+          return nodeChange.value!.id;
+        }
+      }
+    }
+    return null;
+  }
+
   /// Separates disconnected topological components (islands) of [nodeId]'s mesh
   /// into individual twin nodes beside it.
   Future<void> separateMeshIslands(
@@ -298,6 +332,36 @@ mixin EditorControllerClipboard on EditorControllerBase {
       'cellSize': cellSize,
       'axes': axes,
       if (origin != null) 'origin': [origin.x, origin.y, origin.z],
+    });
+  }
+
+  /// Separates each primitive / material of a multi-primitive mesh into individual
+  /// sibling nodes.
+  Future<void> separateMeshPrimitives(LocalId nodeId) async {
+    await run('separateMeshPrimitives', {
+      'nodeId': nodeId.toToken(),
+    });
+  }
+
+  /// Intelligently auto-splits [nodeId] or its hierarchy into distinct parts.
+  /// Separates multi-material primitives and disconnected topological loose parts
+  /// (e.g. doors and windows from a building). If the mesh is a single solid piece,
+  /// bisects it along its longest bounding axis.
+  Future<void> autoSplitMesh(
+    LocalId nodeId, {
+    bool separatePrimitives = true,
+    bool separateIslands = true,
+    bool bisectIfSingleIsland = true,
+    bool recenterPivot = true,
+    bool edgeConnected = true,
+  }) async {
+    await run('autoSplitMesh', {
+      'nodeId': nodeId.toToken(),
+      'separatePrimitives': separatePrimitives,
+      'separateIslands': separateIslands,
+      'bisectIfSingleIsland': bisectIfSingleIsland,
+      'recenterPivot': recenterPivot,
+      'edgeConnected': edgeConnected,
     });
   }
 }

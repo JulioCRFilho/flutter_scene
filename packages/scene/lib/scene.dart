@@ -96,6 +96,7 @@ export 'src/mesh_partition.dart'
         MeshPartitionResult,
         findAllConnectedIslands,
         findConnectedIsland,
+        findTrianglesAlongPolyline,
         findTrianglesInConvexVolume,
         partitionTriangleMesh,
         partitionableVertexLayouts;

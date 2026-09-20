@@ -99,6 +99,22 @@ Vector3? optionalVec3(Map<String, Object?> params, String key) {
   return requireVec3(params, key);
 }
 
+/// Reads a required list of `{x, y, z}` vectors [key].
+List<Vector3> requireVec3List(Map<String, Object?> params, String key) {
+  final v = _get(params, key);
+  if (v == null) _missing(key);
+  if (v is! List) {
+    throw CommandException('Param $key must be a list of 3D points');
+  }
+  if (v.length < 2) {
+    throw CommandException('Param $key must contain at least 2 points');
+  }
+  return [
+    for (var i = 0; i < v.length; i++)
+      requireVec3({'point': v[i]}, 'point'),
+  ];
+}
+
 /// Reads a required `{x, y, z, w}` quaternion [key].
 Quaternion requireQuaternion(Map<String, Object?> params, String key) {
   final m = _requireObject(params, key);

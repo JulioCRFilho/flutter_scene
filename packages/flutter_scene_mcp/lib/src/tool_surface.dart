@@ -1542,6 +1542,125 @@ class EditorToolSurface {
         'additionalProperties': false,
       },
     ),
+    ToolDefinition(
+      name: 'slice_mesh_polyline',
+      description:
+          'Slice a node\'s mesh along an open polyline or closed polygon viewed from a camera direction. '
+          'The mesh is partitioned into two parts: the original node retains one side (or exterior for closed polygon), '
+          'and a new sibling twin node receives the other side (or interior for closed polygon).',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'node': {
+            'type': 'string',
+            'description':
+                'A node slash path (Root/Cube) or id token with a mesh component.',
+          },
+          'points': {
+            'type': 'array',
+            'items': {
+              'type': 'array',
+              'items': {'type': 'number'},
+            },
+            'description':
+                'List of 3D world-space points [[x, y, z], ...] forming the polyline.',
+          },
+          'viewDirection': {
+            'type': 'array',
+            'items': {'type': 'number'},
+            'description':
+                'The 3D camera / extrusion direction vector [vx, vy, vz].',
+          },
+          'isClosed': {
+            'type': 'boolean',
+            'description':
+                'Whether the polyline forms a closed loop / polygon (default false).',
+          },
+          'primitiveIndex': {
+            'type': 'integer',
+            'description':
+                'Which primitive index in the mesh to slice (default 0).',
+          },
+          'recenterPivot': {
+            'type': 'boolean',
+            'description':
+                'Whether to recenter the twin node\'s pivot to its piece\'s '
+                'bounding box center (default true).',
+          },
+          'partName': {
+            'type': 'string',
+            'description': 'Optional name for the newly created twin node.',
+          },
+        },
+        'required': ['node', 'points', 'viewDirection'],
+        'additionalProperties': false,
+      },
+    ),
+    ToolDefinition(
+      name: 'auto_split_mesh',
+      description:
+          'Intelligently auto-splits a 3D model, subtree hierarchy, or mesh into its constituent parts '
+          '(doors, windows, loose parts, multi-material primitives) or bisects single solid meshes along their longest axis.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'node': {
+            'type': 'string',
+            'description':
+                'A node slash path (Root/House) or id token to auto-split (can be a parent group or single mesh).',
+          },
+          'separatePrimitives': {
+            'type': 'boolean',
+            'description':
+                'Whether to separate multi-material primitives into sibling nodes (default true).',
+          },
+          'separateIslands': {
+            'type': 'boolean',
+            'description':
+                'Whether to separate disconnected topological loose parts / islands (default true).',
+          },
+          'bisectIfSingleIsland': {
+            'type': 'boolean',
+            'description':
+                'If true (default), single solid connected meshes with no sub-parts will be bisected along their longest axis.',
+          },
+          'recenterPivot': {
+            'type': 'boolean',
+            'description':
+                'Whether to recenter separated nodes\' pivots to their bounding box centers (default true).',
+          },
+          'edgeConnected': {
+            'type': 'boolean',
+            'description':
+                'If true (default), triangles must share an edge to be connected for loose parts detection; if false, sharing a single vertex is sufficient.',
+          },
+        },
+        'required': ['node'],
+        'additionalProperties': false,
+      },
+    ),
+    ToolDefinition(
+      name: 'separate_mesh_primitives',
+      description:
+          'Separate multi-material primitives of a node\'s mesh into individual child nodes.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'node': {
+            'type': 'string',
+            'description':
+                'A node slash path or id token with a mesh component.',
+          },
+          'recenterPivot': {
+            'type': 'boolean',
+            'description':
+                'Whether to recenter each separated node\'s pivot to its primitive\'s bounding box center (default true).',
+          },
+        },
+        'required': ['node'],
+        'additionalProperties': false,
+      },
+    ),
   ];
 
   /// Dispatches a tool call, returning a JSON-encodable result. Throws a
@@ -1856,6 +1975,12 @@ class EditorToolSurface {
         return _splitMeshSelection(args);
       case 'slice_mesh_plane':
         return _sliceMeshPlane(args);
+      case 'slice_mesh_polyline':
+        return _sliceMeshPolyline(args);
+      case 'auto_split_mesh':
+        return _autoSplitMesh(args);
+      case 'separate_mesh_primitives':
+        return _separateMeshPrimitives(args);
       case 'undo':
         final undone = await (undoRunner?.call() ?? Future.value(_undoHere()));
         return {'undone': undone, 'canUndo': session.history.canUndo};
@@ -2373,6 +2498,151 @@ class EditorToolSurface {
       if (partName is String && partName.isNotEmpty) 'partName': partName,
     };
     return _dispatchCommand('sliceMeshByPlane', params);
+  }
+
+  Future<Map<String, Object?>> _sliceMeshPolyline(
+    Map<String, Object?> args,
+  ) async {
+    final nodeArg = args['node'] ?? args['ref'];
+    if (nodeArg is! String || nodeArg.isEmpty) {
+      throw const ToolError(
+        'slice_mesh_polyline needs a node "node" (slash path or id token)',
+      );
+    }
+    final node = _resolve(nodeArg);
+
+    List<double> parseVec3(Object? raw, String fieldName) {
+      if (raw is List &&
+          raw.length >= 3 &&
+          raw[0] is num &&
+          raw[1] is num &&
+          raw[2] is num) {
+        return [
+          (raw[0] as num).toDouble(),
+          (raw[1] as num).toDouble(),
+          (raw[2] as num).toDouble(),
+        ];
+      }
+      if (raw is Map &&
+          raw['x'] is num &&
+          raw['y'] is num &&
+          raw['z'] is num) {
+        return [
+          (raw['x'] as num).toDouble(),
+          (raw['y'] as num).toDouble(),
+          (raw['z'] as num).toDouble(),
+        ];
+      }
+      throw ToolError(
+        'slice_mesh_polyline needs "$fieldName" as [x, y, z] or {x, y, z}',
+      );
+    }
+
+    final rawPoints = args['points'];
+    if (rawPoints is! List || rawPoints.length < 2) {
+      throw const ToolError(
+        'slice_mesh_polyline needs "points" as a list of at least two 3D points',
+      );
+    }
+    final points = <List<double>>[];
+    for (var i = 0; i < rawPoints.length; i++) {
+      points.add(parseVec3(rawPoints[i], 'points[$i]'));
+    }
+
+    final viewDirection = parseVec3(args['viewDirection'], 'viewDirection');
+
+    final isClosed = args['isClosed'];
+    if (isClosed != null && isClosed is! bool) {
+      throw const ToolError('"isClosed" must be a boolean');
+    }
+    final primitiveIndex = args['primitiveIndex'];
+    if (primitiveIndex != null && primitiveIndex is! int) {
+      throw const ToolError('"primitiveIndex" must be an integer');
+    }
+    final recenterPivot = args['recenterPivot'];
+    if (recenterPivot != null && recenterPivot is! bool) {
+      throw const ToolError('"recenterPivot" must be a boolean');
+    }
+    final partName = args['partName'];
+    if (partName != null && (partName is! String || partName.isEmpty)) {
+      throw const ToolError('"partName" must be a non-empty string');
+    }
+
+    final params = <String, Object?>{
+      'nodeId': node.id.toToken(),
+      'points': points,
+      'viewDirection': viewDirection,
+      if (isClosed is bool) 'isClosed': isClosed,
+      if (primitiveIndex is int) 'primitiveIndex': primitiveIndex,
+      if (recenterPivot is bool) 'recenterPivot': recenterPivot,
+      if (partName is String && partName.isNotEmpty) 'partName': partName,
+    };
+    return _dispatchCommand('sliceMeshByPolyline', params);
+  }
+
+  Future<Map<String, Object?>> _autoSplitMesh(
+    Map<String, Object?> args,
+  ) async {
+    final nodeArg = args['node'] ?? args['ref'];
+    if (nodeArg is! String || nodeArg.isEmpty) {
+      throw const ToolError(
+        'auto_split_mesh needs a node "node" (slash path or id token)',
+      );
+    }
+    final node = _resolve(nodeArg);
+    final separatePrimitives = args['separatePrimitives'];
+    if (separatePrimitives != null && separatePrimitives is! bool) {
+      throw const ToolError('"separatePrimitives" must be a boolean');
+    }
+    final separateIslands = args['separateIslands'];
+    if (separateIslands != null && separateIslands is! bool) {
+      throw const ToolError('"separateIslands" must be a boolean');
+    }
+    final bisectIfSingleIsland = args['bisectIfSingleIsland'];
+    if (bisectIfSingleIsland != null && bisectIfSingleIsland is! bool) {
+      throw const ToolError('"bisectIfSingleIsland" must be a boolean');
+    }
+    final recenterPivot = args['recenterPivot'];
+    if (recenterPivot != null && recenterPivot is! bool) {
+      throw const ToolError('"recenterPivot" must be a boolean');
+    }
+    final edgeConnected = args['edgeConnected'];
+    if (edgeConnected != null && edgeConnected is! bool) {
+      throw const ToolError('"edgeConnected" must be a boolean');
+    }
+
+    final params = <String, Object?>{
+      'nodeId': node.id.toToken(),
+      if (separatePrimitives is bool) 'separatePrimitives': separatePrimitives,
+      if (separateIslands is bool) 'separateIslands': separateIslands,
+      if (bisectIfSingleIsland is bool)
+        'bisectIfSingleIsland': bisectIfSingleIsland,
+      if (recenterPivot is bool) 'recenterPivot': recenterPivot,
+      if (edgeConnected is bool) 'edgeConnected': edgeConnected,
+    };
+    return _dispatchCommand('autoSplitMesh', params);
+  }
+
+  Future<Map<String, Object?>> _separateMeshPrimitives(
+    Map<String, Object?> args,
+  ) async {
+    final nodeArg = args['node'] ?? args['ref'];
+    if (nodeArg is! String || nodeArg.isEmpty) {
+      throw const ToolError(
+        'separate_mesh_primitives needs a node "node" (slash path or id token)',
+      );
+    }
+    final node = _resolve(nodeArg);
+    final recenterPivot = args['recenterPivot'];
+    if (recenterPivot != null && recenterPivot is! bool) {
+      throw const ToolError('"recenterPivot" must be a boolean');
+    }
+
+    final params = <String, Object?>{
+      'nodeId': node.id.toToken(),
+      if (recenterPivot is bool) 'recenterPivot': recenterPivot,
+    };
+    return _dispatchCommand('separateMeshPrimitives', params);
   }
 
   /// The entities [transaction] brought into existence, as

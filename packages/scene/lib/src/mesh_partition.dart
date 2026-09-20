@@ -429,3 +429,177 @@ Set<int> findTrianglesInConvexVolume({
 
   return matching;
 }
+
+/// Finds triangle indices partitioned by an extruded polyline or closed polygon.
+///
+/// [points] are 3D world-space vertices of the polyline.
+/// [extrusionDirection] is the direction along which the polyline is extruded
+/// (e.g. camera view vector).
+/// If [isClosed] is true, returns triangles whose centroid falls inside the
+/// closed polygon extruded along [extrusionDirection].
+/// If [isClosed] is false, returns triangles whose centroid falls on the positive
+/// side of the open directed polyline extruded along [extrusionDirection].
+/// If [worldTransform] is provided, vertex coordinates are transformed to world
+/// space prior to testing against the cutting geometry.
+/// {@category Documents}
+Set<int> findTrianglesAlongPolyline({
+  required Uint8List vertexBytes,
+  required String layout,
+  List<int>? indices,
+  required List<Vector3> points,
+  required Vector3 extrusionDirection,
+  bool isClosed = false,
+  Matrix4? worldTransform,
+}) {
+  if (points.length < 2) {
+    throw ArgumentError.value(
+      points,
+      'points',
+      'must contain at least 2 points to define a cutting line/polygon',
+    );
+  }
+  if (isClosed && points.length < 3) {
+    throw ArgumentError.value(
+      points,
+      'points',
+      'must contain at least 3 points to form a closed polygon',
+    );
+  }
+  if (extrusionDirection.length2 < 1e-8) {
+    throw ArgumentError.value(
+      extrusionDirection,
+      'extrusionDirection',
+      'must not be a zero vector',
+    );
+  }
+
+  final layoutInfo = _layouts[layout];
+  if (layoutInfo == null) {
+    throw ArgumentError.value(layout, 'layout', 'unsupported layout');
+  }
+  final vertexCount = vertexBytes.length ~/ layoutInfo.bytesPerVertex;
+  final triangleIndices = indices ?? List<int>.generate(vertexCount, (i) => i);
+  final totalTriangles = triangleIndices.length ~/ 3;
+  final floats = Float32List.sublistView(vertexBytes);
+  final positionStride = layoutInfo.soaStreams == null
+      ? layoutInfo.bytesPerVertex ~/ 4
+      : 3;
+
+  // Build orthonormal 2D frame (xHat, yHat) perpendicular to zHat (extrusionDirection).
+  final zHat = extrusionDirection.normalized();
+  final p0 = points.first;
+  final u = points[1] - p0;
+  var uPerp = u - zHat * u.dot(zHat);
+  if (uPerp.length2 < 1e-8) {
+    final testVec = zHat.x.abs() < 0.9 ? Vector3(1, 0, 0) : Vector3(0, 1, 0);
+    uPerp = testVec - zHat * testVec.dot(zHat);
+  }
+  final xHat = uPerp.normalized();
+  final yHat = zHat.cross(xHat).normalized();
+
+  // Project polyline points into the 2D plane (xHat, yHat).
+  final poly2d = <Vector2>[
+    for (final pt in points)
+      Vector2((pt - p0).dot(xHat), (pt - p0).dot(yHat)),
+  ];
+
+  // If open polyline, construct extended polyline extending past the endpoints to infinity.
+  // Handle degenerate segments (consecutive points projecting to the same 2D position).
+  List<Vector2>? extendedPoly;
+  if (!isClosed) {
+    // Compute direction vectors for the first and last segments.
+    // If a segment is degenerate (zero length in 2D), use the extrusion direction
+    // projected onto the cut plane as a sensible fallback.
+    final dStart = poly2d[1] - poly2d[0];
+    Vector2 dStartNorm;
+    if (dStart.length2 > 1e-12) {
+      dStartNorm = dStart.normalized();
+    } else {
+      // Fallback: project extrusion direction into 2D and use that
+      final extr2d = Vector2(extrusionDirection.dot(xHat), extrusionDirection.dot(yHat));
+      dStartNorm = extr2d.length2 > 1e-12 ? extr2d.normalized() : Vector2(1, 0);
+    }
+
+    final lastIdx = poly2d.length - 1;
+    final dEnd = poly2d[lastIdx] - poly2d[lastIdx - 1];
+    Vector2 dEndNorm;
+    if (dEnd.length2 > 1e-12) {
+      dEndNorm = dEnd.normalized();
+    } else {
+      // Reverse of the start direction gives a consistent extension
+      final extr2d = Vector2(extrusionDirection.dot(xHat), extrusionDirection.dot(yHat));
+      dEndNorm = extr2d.length2 > 1e-12 ? -extr2d.normalized() : Vector2(-1, 0);
+    }
+
+    extendedPoly = [
+      poly2d.first - dStartNorm * 1e5,
+      ...poly2d,
+      poly2d.last + dEndNorm * 1e5,
+    ];
+  }
+
+  final matching = <int>{};
+  final local = Vector3.zero();
+  final centroid = Vector3.zero();
+  final pC = Vector2.zero();
+
+  for (var tri = 0; tri < totalTriangles; tri++) {
+    centroid.setZero();
+    for (var c = 0; c < 3; c++) {
+      final v = triangleIndices[tri * 3 + c] * positionStride;
+      local.setValues(floats[v], floats[v + 1], floats[v + 2]);
+      if (worldTransform != null) {
+        worldTransform.transform3(local);
+      }
+      centroid.add(local);
+    }
+    centroid.scale(1 / 3);
+
+    // Project centroid into the 2D cut plane.
+    final rel = centroid - p0;
+    pC.setValues(rel.dot(xHat), rel.dot(yHat));
+
+    if (isClosed) {
+      // Point-in-polygon ray casting test.
+      var inside = false;
+      final n = poly2d.length;
+      for (var i = 0, j = n - 1; i < n; j = i++) {
+        final xi = poly2d[i].x, yi = poly2d[i].y;
+        final xj = poly2d[j].x, yj = poly2d[j].y;
+        final intersect = ((yi > pC.y) != (yj > pC.y)) &&
+            (pC.x < (xj - xi) * (pC.y - yi) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+      }
+      if (inside) matching.add(tri);
+    } else {
+      // Open polyline: find closest segment on extended polyline and test side.
+      final poly = extendedPoly!;
+      var minDistanceSq = double.infinity;
+      var bestCross = 0.0;
+
+      for (var i = 0; i < poly.length - 1; i++) {
+        final a = poly[i];
+        final b = poly[i + 1];
+        final ab = b - a;
+        final ap = pC - a;
+        final abLenSq = ab.length2;
+        if (abLenSq < 1e-12) continue;
+
+        final t = (ap.dot(ab) / abLenSq).clamp(0.0, 1.0);
+        final closest = a + ab * t;
+        final distSq = (pC - closest).length2;
+        if (distSq < minDistanceSq) {
+          minDistanceSq = distSq;
+          // 2D cross product: ab.x * ap.y - ab.y * ap.x
+          bestCross = ab.x * ap.y - ab.y * ap.x;
+        }
+      }
+
+      if (bestCross >= 0) {
+        matching.add(tri);
+      }
+    }
+  }
+
+  return matching;
+}

@@ -203,4 +203,61 @@ void main() {
       expect(selected, isNot(contains(4))); // x=2+ is outside
     });
   });
+
+  group('findTrianglesAlongPolyline', () {
+    test('open polyline partitions space cleanly', () {
+      final data = _stripData(4); // quads from x=0 to x=4, y in [0, 1], z=0
+      // Polyline running along x=1.5 from y=-1 to y=2. Extrusion direction: (0, 0, 1)
+      final selected = findTrianglesAlongPolyline(
+        vertexBytes: data.soa,
+        layout: 'unskinned_soa_uv1_tangent',
+        indices: Uint16List.sublistView(data.indices),
+        points: [Vector3(1.5, -1.0, 0.0), Vector3(1.5, 2.0, 0.0)],
+        extrusionDirection: Vector3(0.0, 0.0, 1.0),
+      );
+
+      expect(selected.isNotEmpty, isTrue);
+      expect(selected.length, lessThan(8));
+    });
+
+    test('multi-point polyline (3 points / zigzag) partitions triangles', () {
+      final data = _stripData(4);
+      // Polyline with 3 points: (1.0, -1, 0) -> (1.5, 0.5, 0) -> (1.0, 2, 0)
+      final selected = findTrianglesAlongPolyline(
+        vertexBytes: data.soa,
+        layout: 'unskinned_soa_uv1_tangent',
+        indices: Uint16List.sublistView(data.indices),
+        points: [
+          Vector3(1.0, -1.0, 0.0),
+          Vector3(1.5, 0.5, 0.0),
+          Vector3(1.0, 2.0, 0.0),
+        ],
+        extrusionDirection: Vector3(0.0, 0.0, 1.0),
+      );
+      expect(selected.isNotEmpty, isTrue);
+    });
+
+    test('closed polygon (lasso) selects interior triangles', () {
+      final data = _stripData(4); // quads from x=0 to x=4, y in [0, 1]
+      // Closed loop enclosing the first quad (x in [0, 1], y in [0, 1]):
+      final selected = findTrianglesAlongPolyline(
+        vertexBytes: data.soa,
+        layout: 'unskinned_soa_uv1_tangent',
+        indices: Uint16List.sublistView(data.indices),
+        points: [
+          Vector3(-0.5, -0.5, 0.0),
+          Vector3(1.1, -0.5, 0.0),
+          Vector3(1.1, 1.5, 0.0),
+          Vector3(-0.5, 1.5, 0.0),
+        ],
+        extrusionDirection: Vector3(0.0, 0.0, 1.0),
+        isClosed: true,
+      );
+
+      // First quad has triangles 0 and 1
+      expect(selected, containsAll([0, 1]));
+      expect(selected, isNot(contains(2)));
+      expect(selected, isNot(contains(4)));
+    });
+  });
 }

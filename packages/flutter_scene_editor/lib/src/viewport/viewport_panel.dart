@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:math';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
@@ -10,7 +10,8 @@ import 'package:flutter_scene_editor_core/flutter_scene_editor_core.dart'
 // The editor's own OrbitCameraController (a viewport widget) predates the
 // engine's; hide the engine one here to keep using the local widget.
 import 'package:flutter_scene/scene.dart' hide OrbitCameraController, Material;
-import 'package:scene/scene.dart' show LocalId, TrsTransform;
+import 'package:scene/scene.dart'
+    show GeometryResource, LocalId, ResourceRefValue, TrsTransform;
 import 'package:native_mouse_cursor/native_mouse_cursor.dart';
 import 'package:vector_math/vector_math.dart' as vm;
 
@@ -104,10 +105,11 @@ class _ViewportPanelState extends State<ViewportPanel> {
   _PendingSelection? _pendingSelection;
 
   // Active state for the viewport interactive snipping tool.
-  Offset? _snipStart;
-  Offset? _snipEnd;
-  bool _isDrawingSnip = false;
-  bool _snipLineActive = false;
+  final List<Offset> _snipPoints = [];
+  Offset? _snipHover;
+  bool _snipClosed = false;
+  int? _snipDraggedIndex;
+  Offset? _snipDragStart;
   bool _isExecutingSnip = false;
 
   // The pointer's last position over this viewport, kept for starting a
@@ -237,10 +239,46 @@ class _ViewportPanelState extends State<ViewportPanel> {
     }
     if (event.buttons & kPrimaryMouseButton == 0) return;
     if (_gizmo.mode == GizmoMode.snip) {
-      _snipStart = event.localPosition;
-      _snipEnd = event.localPosition;
-      _isDrawingSnip = true;
-      _snipLineActive = false;
+      final pos = event.localPosition;
+      _snipDragStart = pos;
+
+      // 1. Check if user clicked near existing handle (radius 14px)
+      int? hitIndex;
+      for (var i = 0; i < _snipPoints.length; i++) {
+        if ((pos - _snipPoints[i]).distance <= 14.0) {
+          hitIndex = i;
+          break;
+        }
+      }
+
+      if (hitIndex != null) {
+        // If they clicked the first point and have >= 3 points, close the loop!
+        if (hitIndex == 0 && _snipPoints.length >= 3 && !_snipClosed) {
+          _snipClosed = true;
+          _snipHover = null;
+          _snipDraggedIndex = null;
+        } else if (!_snipClosed) {
+          // Only allow dragging when the polygon is not yet closed.
+          // Once closed, the shape is locked and users must undo/cancel to modify.
+          _snipDraggedIndex = hitIndex;
+        }
+        _bumpView();
+        return;
+      }
+
+      if (_snipClosed) return;
+
+      if (_snipPoints.isEmpty) {
+        _snipPoints.add(pos);
+        _snipHover = pos;
+        _snipDraggedIndex = 0;
+        _bumpView();
+        return;
+      }
+
+      _snipPoints.add(pos);
+      _snipHover = pos;
+      _snipDraggedIndex = _snipPoints.length - 1;
       _bumpView();
       return;
     }
@@ -282,8 +320,17 @@ class _ViewportPanelState extends State<ViewportPanel> {
       );
       return;
     }
-    if (_isDrawingSnip) {
-      _snipEnd = event.localPosition;
+    if (_gizmo.mode == GizmoMode.snip) {
+      if (_snipDraggedIndex != null && _snipDragStart != null) {
+        if (_snipPoints.length == 1 && _snipDraggedIndex == 0) {
+          _snipHover = event.localPosition;
+        } else {
+          _snipPoints[_snipDraggedIndex!] = event.localPosition;
+          _snipHover = event.localPosition;
+        }
+      } else {
+        _snipHover = event.localPosition;
+      }
       _bumpView();
       return;
     }
@@ -315,18 +362,22 @@ class _ViewportPanelState extends State<ViewportPanel> {
       _endFreeLook();
       return;
     }
-    if (_isDrawingSnip) {
-      _isDrawingSnip = false;
-      final start = _snipStart;
-      final end = _snipEnd;
-      if (start != null && end != null && (end - start).distance >= 10.0) {
-        _snipLineActive = true;
-      } else {
-        _snipStart = null;
-        _snipEnd = null;
-        _snipLineActive = false;
-        _performRaycast(event.localPosition, _viewSize);
+    if (_gizmo.mode == GizmoMode.snip) {
+      final start = _snipDragStart;
+      final current = event.localPosition;
+      final draggedIdx = _snipDraggedIndex;
+      _snipDragStart = null;
+      _snipDraggedIndex = null;
+
+      if (_snipPoints.length == 1 && draggedIdx == 0 && start != null) {
+        if ((current - start).distance >= 12.0) {
+          _snipPoints.add(current);
+        } else {
+          _performRaycast(event.localPosition, _viewSize);
+        }
       }
+
+      _snipHover = current;
       _bumpView();
       return;
     }
@@ -375,7 +426,7 @@ class _ViewportPanelState extends State<ViewportPanel> {
   void _onPointerCancel(PointerCancelEvent event) {
     if (_freeLookActive) _endFreeLook();
     if (_pendingSelection?.pointer == event.pointer) _pendingSelection = null;
-    if (_isDrawingSnip) {
+    if (_snipPoints.isNotEmpty) {
       _cancelSnip();
     }
     if (_draggingGizmo) {
@@ -682,10 +733,10 @@ class _ViewportPanelState extends State<ViewportPanel> {
   void _setMode(GizmoMode mode) {
     if (_gizmo.mode == mode) return;
     if (mode != GizmoMode.snip) {
-      _snipStart = null;
-      _snipEnd = null;
-      _isDrawingSnip = false;
-      _snipLineActive = false;
+      _snipPoints.clear();
+      _snipHover = null;
+      _snipClosed = false;
+      _snipDraggedIndex = null;
     }
     _gizmo.mode = mode;
     _bumpView();
@@ -777,9 +828,7 @@ class _ViewportPanelState extends State<ViewportPanel> {
   }
 
   Future<void> _executeSnip() async {
-    final start = _snipStart;
-    final end = _snipEnd;
-    if (start == null || end == null || (end - start).distance < 5.0) return;
+    if (_snipPoints.length < 2) return;
 
     final primary = _ctrl.selection.primary;
     if (primary == null) {
@@ -830,26 +879,88 @@ class _ViewportPanelState extends State<ViewportPanel> {
 
     try {
       final cam = _freeLookActive ? _freeLook.camera : _camera.camera;
-      final ray1 = cam.screenPointToRay(start, _viewSize);
-      final ray2 = cam.screenPointToRay(end, _viewSize);
 
-      final nodeCenter = live.globalTransform.getTranslation();
-      final d = (nodeCenter - ray1.origin).dot(ray1.direction).clamp(0.1, 1000.0);
-      final pt1 = ray1.origin + ray1.direction * d;
-      final pt2 = ray2.origin + ray2.direction * d;
-
-      final u = pt2 - pt1;
-      final v = ray1.direction;
-      final normal = u.cross(v);
-      if (normal.length2 < 1e-8) {
-        throw CommandException('Cut line is too short or parallel to camera ray');
+      // Determine model depth extent in world space for accurate unprojection.
+      // Using the full bounds depth range instead of just the center gives much
+      // better 3D placement for each screen point when the mesh is large or the
+      // camera is at an oblique angle.
+      final meshComp = docNode.components.firstWhere(
+        (c) => c.type == 'mesh',
+        orElse: () => docNode.components.first,
+      );
+      final geomRef = meshComp.properties['geometry'];
+      vm.Vector3 depthMin = live.globalTransform.getTranslation();
+      vm.Vector3 depthMax = depthMin;
+      vm.Vector3 localCenter = vm.Vector3.zero();
+      if (geomRef is ResourceRefValue) {
+        final geom = _ctrl.document.resources[geomRef.id];
+        if (geom is GeometryResource && geom.bounds != null) {
+          final b = geom.bounds!;
+          localCenter = (b.min + b.max) * 0.5;
+          final minWorld = live.globalTransform.transform3(b.min.clone());
+          final maxWorld = live.globalTransform.transform3(b.max.clone());
+          // Compute world-space min/max corners accounting for rotation
+          depthMin = vm.Vector3(
+            math.min(minWorld.x, maxWorld.x),
+            math.min(minWorld.y, maxWorld.y),
+            math.min(minWorld.z, maxWorld.z),
+          );
+          depthMax = vm.Vector3(
+            math.max(minWorld.x, maxWorld.x),
+            math.max(minWorld.y, maxWorld.y),
+            math.max(minWorld.z, maxWorld.z),
+          );
+        }
       }
-      normal.normalize();
 
-      await _ctrl.sliceMeshByPlane(
+      final forward = cam.forward.normalized();
+
+      // Unproject each screen point into 3D world space at the model's depth plane.
+      // For each point, we find the intersection with the near and far depth planes
+      // and pick the one closer to the mesh center depth for better accuracy.
+      final worldPoints = <vm.Vector3>[];
+      for (final pt in _snipPoints) {
+        final ray = cam.screenPointToRay(pt, _viewSize);
+        final rayDir = ray.direction.normalized();
+
+        // Find the depth of the ray at the mesh's depth range.
+        // We compute intersection with both near and far planes and use
+        // the one that's within the mesh bounds, preferring the near plane
+        // for a more natural "what you see is what you cut" behavior.
+        final nearPoint = _unprojectToDepthPlane(
+          ray.origin,
+          rayDir,
+          forward,
+          depthMin.dot(forward),
+          cam.position.dot(forward),
+        );
+        final farPoint = _unprojectToDepthPlane(
+          ray.origin,
+          rayDir,
+          forward,
+          depthMax.dot(forward),
+          cam.position.dot(forward),
+        );
+
+        // Pick the point closer to the mesh center depth
+        final centerDepth = localCenter.dot(forward);
+        final depthDiffNear = (nearPoint - cam.position).dot(forward) - centerDepth;
+        final depthDiffFar = (farPoint - cam.position).dot(forward) - centerDepth;
+
+        final chosenPoint = depthDiffNear.abs() <= depthDiffFar.abs()
+            ? nearPoint
+            : farPoint;
+
+        worldPoints.add(chosenPoint);
+      }
+
+      final viewDir = forward;
+
+      final twinId = await _ctrl.sliceMeshByPolyline(
         primary,
-        planePoint: pt1,
-        planeNormal: normal,
+        points: worldPoints,
+        viewDirection: viewDir,
+        isClosed: _snipClosed,
         recenterPivot: true,
       );
 
@@ -857,12 +968,25 @@ class _ViewportPanelState extends State<ViewportPanel> {
 
       if (mounted) {
         final nodeName = docNode.name.isEmpty ? 'Model' : docNode.name;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('✂️ $nodeName snipped into 2 parts'),
-            duration: const Duration(seconds: 2),
-          ),
-        );
+        final modeDesc = _snipClosed
+            ? 'closed loop'
+            : '${worldPoints.length}-point cut';
+
+        if (twinId != null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('✂️ $nodeName snipped into 2 parts ($modeDesc)'),
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('✂️ Cut did not intersect the mesh — no change made'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
       }
     } on CommandException catch (e) {
       if (mounted) {
@@ -880,14 +1004,122 @@ class _ViewportPanelState extends State<ViewportPanel> {
     }
   }
 
-  void _cancelSnip() {
+  Future<void> _performAutoSplit() async {
+    final primary = _ctrl.selection.primary;
+    if (primary == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Please select a model or group in the scene to auto-split'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
+
+    final docNode = _ctrl.document.nodes[primary];
+    if (docNode == null) return;
+
+    if (docNode.instance != null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Node is a linked prefab instance. Import with "Link to source" '
+              'unchecked to edit its geometry.',
+            ),
+            duration: Duration(seconds: 4),
+          ),
+        );
+      }
+      return;
+    }
+
+    try {
+      await _ctrl.autoSplitMesh(primary);
+      if (mounted) {
+        final nodeName = docNode.name.isEmpty ? 'Model' : docNode.name;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('⚡ Auto-split completed on $nodeName'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } on CommandException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.message),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Auto-split failed: $e'),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    }
+  }
+
+  void _undoLastSnipPoint() {
     setState(() {
-      _snipStart = null;
-      _snipEnd = null;
-      _isDrawingSnip = false;
-      _snipLineActive = false;
+      if (_snipClosed) {
+        _snipClosed = false;
+      } else if (_snipPoints.isNotEmpty) {
+        _snipPoints.removeLast();
+        if (_snipPoints.isEmpty) {
+          _snipHover = null;
+        }
+      }
     });
     _bumpView();
+  }
+
+  void _cancelSnip() {
+    setState(() {
+      _snipPoints.clear();
+      _snipHover = null;
+      _snipClosed = false;
+      _snipDraggedIndex = null;
+      _snipDragStart = null;
+    });
+    _bumpView();
+  }
+
+  /// Unprojects a screen ray to a point at a specific depth along the view direction.
+  ///
+  /// [rayOrigin] and [rayDir] define the screen ray. [depthValue] is the depth
+  /// coordinate along [forward] to intersect with. [cameraDepth] is the camera's
+  /// depth position for fallback computation.
+  vm.Vector3 _unprojectToDepthPlane(
+    vm.Vector3 rayOrigin,
+    vm.Vector3 rayDir,
+    vm.Vector3 forward,
+    double depthValue,
+    double cameraDepth,
+  ) {
+    final denom = rayDir.dot(forward);
+    final toPlane = depthValue - rayOrigin.dot(forward);
+
+    // If the ray is roughly parallel to the depth plane, fall back to projecting
+    // along the ray direction from the camera position at the target depth.
+    if (denom.abs() < 1e-6) {
+      final t = (depthValue - cameraDepth) / forward.dot(forward).abs();
+      return rayOrigin + forward * t;
+    }
+
+    // Intersection distance along the ray
+    final d = toPlane / denom;
+    // Clamp to avoid points behind the camera or extremely far away
+    final clampedD = d.clamp(0.0, 1e6);
+    return rayOrigin + rayDir * clampedD;
   }
 
   vm.Matrix4 _modalMatrixFor(_TransformTarget target, _ModalTransform modal) {
@@ -945,10 +1177,10 @@ class _ViewportPanelState extends State<ViewportPanel> {
     if (_viewSize.height <= 0) return 0;
     // Matches the orbit camera's 45 degree vertical field of view and its
     // orthographic height coupling.
-    final scale = 2 * tan(pi / 8) / _viewSize.height;
+    final scale = 2 * math.tan(math.pi / 8) / _viewSize.height;
     if (_camera.orthographic) return _camera.radius * scale;
     final depth = (modal.origin - _camera.position).dot(_camera.forwardVector);
-    return max(depth, 0.01) * scale;
+    return math.max(depth, 0.01) * scale;
   }
 
   vm.Vector3 _modalTranslation(_ModalTransform modal) {
@@ -978,7 +1210,7 @@ class _ViewportPanelState extends State<ViewportPanel> {
 
   double _modalRotationAngle(_ModalTransform modal) {
     double angleOf(Offset p) =>
-        atan2(p.dy - modal.pivotScreen.dy, p.dx - modal.pivotScreen.dx);
+        math.atan2(p.dy - modal.pivotScreen.dy, p.dx - modal.pivotScreen.dx);
     // Positive when the mouse circles clockwise on screen (y grows down).
     final screenAngle = angleOf(modal.pointer) - angleOf(modal.startPointer);
     final axis = _modalRotationAxis(modal);
@@ -1115,14 +1347,21 @@ class _ViewportPanelState extends State<ViewportPanel> {
       }
       return KeyEventResult.handled;
     }
-    if (_snipLineActive) {
+    if (_snipPoints.isNotEmpty) {
       if (event.logicalKey == LogicalKeyboardKey.enter ||
           event.logicalKey == LogicalKeyboardKey.numpadEnter) {
-        _executeSnip();
+        if (_snipPoints.length >= 2) {
+          _executeSnip();
+        }
         return KeyEventResult.handled;
       }
       if (event.logicalKey == LogicalKeyboardKey.escape) {
         _cancelSnip();
+        return KeyEventResult.handled;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.backspace ||
+          event.logicalKey == LogicalKeyboardKey.delete) {
+        _undoLastSnipPoint();
         return KeyEventResult.handled;
       }
     }
@@ -1141,6 +1380,16 @@ class _ViewportPanelState extends State<ViewportPanel> {
         _startModal(_ModalOp.scale);
         return KeyEventResult.handled;
       case LogicalKeyboardKey.keyK:
+        if (HardwareKeyboard.instance.isShiftPressed) {
+          _performAutoSplit();
+          return KeyEventResult.handled;
+        }
+        _setMode(
+          _gizmo.mode == GizmoMode.snip
+              ? GizmoMode.translate
+              : GizmoMode.snip,
+        );
+        return KeyEventResult.handled;
       case LogicalKeyboardKey.keyC:
         _setMode(
           _gizmo.mode == GizmoMode.snip
@@ -1211,6 +1460,12 @@ class _ViewportPanelState extends State<ViewportPanel> {
           onHover: (event) {
             _mousePos = event.localPosition;
             if (_modal != null) _updateModal(event.localPosition);
+            if (_gizmo.mode == GizmoMode.snip &&
+                _snipPoints.isNotEmpty &&
+                !_snipClosed) {
+              _snipHover = event.localPosition;
+              _bumpView();
+            }
           },
           child: Stack(
             fit: StackFit.expand,
@@ -1271,8 +1526,8 @@ class _ViewportPanelState extends State<ViewportPanel> {
                                 _draggingGizmo ||
                                 _modal != null ||
                                 _freeLookActive ||
-                                _isDrawingSnip ||
-                                (_gizmo.mode == GizmoMode.snip && _snipLineActive),
+                                (_gizmo.mode == GizmoMode.snip &&
+                                    _snipPoints.isNotEmpty),
                             onChanged: _bumpView,
                             child: Listener(
                               behavior: HitTestBehavior.opaque,
@@ -1343,88 +1598,131 @@ class _ViewportPanelState extends State<ViewportPanel> {
                               size: size,
                             ),
                           ),
-                          if (_snipStart != null && _snipEnd != null)
+                          if (_snipPoints.isNotEmpty)
                             IgnorePointer(
                               child: CustomPaint(
                                 painter: _SnipOverlayPainter(
-                                  start: _snipStart!,
-                                  end: _snipEnd!,
-                                  isActive: _snipLineActive,
+                                  points: _snipPoints,
+                                  hoverPoint: _snipHover,
+                                  isClosed: _snipClosed,
                                   primaryColor:
                                       Theme.of(context).colorScheme.primary,
                                 ),
                                 size: size,
                               ),
                             ),
-                          if (_snipLineActive &&
-                              _snipStart != null &&
-                              _snipEnd != null)
-                            Positioned(
-                              left: (((_snipStart!.dx + _snipEnd!.dx) / 2) - 85)
-                                  .clamp(12.0, max(12.0, size.width - 180.0)),
-                              top: (((_snipStart!.dy + _snipEnd!.dy) / 2) - 44)
-                                  .clamp(12.0, max(12.0, size.height - 60.0)),
-                              child: Material(
-                                elevation: 8,
-                                borderRadius: BorderRadius.circular(20),
-                                color: const Color(0xFF1E1E24),
-                                shadowColor: Colors.black.withValues(alpha: 0.6),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 6,
-                                    vertical: 4,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(20),
-                                    border: Border.all(
-                                      color: Theme.of(context)
-                                          .colorScheme
-                                          .primary
-                                          .withValues(alpha: 0.8),
-                                      width: 1.5,
+                          if (_snipPoints.length >= 2)
+                            () {
+                              var minX = double.infinity;
+                              var maxX = -double.infinity;
+                              var minY = double.infinity;
+                              var maxY = -double.infinity;
+                              for (final p in _snipPoints) {
+                                if (p.dx < minX) minX = p.dx;
+                                if (p.dx > maxX) maxX = p.dx;
+                                if (p.dy < minY) minY = p.dy;
+                                if (p.dy > maxY) maxY = p.dy;
+                              }
+                              final centerX = (minX + maxX) / 2;
+                              final bottomY = maxY + 20;
+
+                              return Positioned(
+                                left: (centerX - 100)
+                                    .clamp(12.0, math.max(12.0, size.width - 240.0)),
+                                top: bottomY
+                                    .clamp(12.0, math.max(12.0, size.height - 60.0)),
+                                child: Material(
+                                  elevation: 8,
+                                  borderRadius: BorderRadius.circular(20),
+                                  color: const Color(0xFF1E1E24),
+                                  shadowColor: Colors.black.withValues(alpha: 0.6),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 6,
+                                      vertical: 4,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(20),
+                                      border: Border.all(
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .primary
+                                            .withValues(alpha: 0.8),
+                                        width: 1.5,
+                                      ),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        FilledButton.icon(
+                                          style: FilledButton.styleFrom(
+                                            visualDensity: VisualDensity.compact,
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 10,
+                                              vertical: 0,
+                                            ),
+                                            backgroundColor:
+                                                Theme.of(context).colorScheme.primary,
+                                            foregroundColor: Colors.black,
+                                          ),
+                                          onPressed:
+                                              _isExecutingSnip ? null : _executeSnip,
+                                          icon: const Icon(Icons.content_cut, size: 14),
+                                          label: Text(
+                                            'Snip (${_snipPoints.length} pts)',
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        if (!_snipClosed && _snipPoints.length >= 3) ...[
+                                          IconButton(
+                                            visualDensity: VisualDensity.compact,
+                                            iconSize: 16,
+                                            tooltip: 'Close loop',
+                                            onPressed: () {
+                                              setState(() {
+                                                _snipClosed = true;
+                                                _snipHover = null;
+                                              });
+                                              _bumpView();
+                                            },
+                                            icon: const Icon(
+                                              Icons.polyline,
+                                              color: Colors.white70,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 2),
+                                        ],
+                                        IconButton(
+                                          visualDensity: VisualDensity.compact,
+                                          iconSize: 16,
+                                          tooltip: 'Undo last point (Backspace)',
+                                          onPressed: _undoLastSnipPoint,
+                                          icon: const Icon(
+                                            Icons.undo,
+                                            color: Colors.white70,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 2),
+                                        IconButton(
+                                          visualDensity: VisualDensity.compact,
+                                          iconSize: 16,
+                                          tooltip: 'Cancel (Esc)',
+                                          onPressed: _cancelSnip,
+                                          icon: const Icon(
+                                            Icons.close,
+                                            color: Colors.white70,
+                                          ),
+                                        ),
+                                      ],
                                     ),
                                   ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      FilledButton.icon(
-                                        style: FilledButton.styleFrom(
-                                          visualDensity: VisualDensity.compact,
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 10,
-                                            vertical: 0,
-                                          ),
-                                          backgroundColor:
-                                              Theme.of(context).colorScheme.primary,
-                                          foregroundColor: Colors.black,
-                                        ),
-                                        onPressed:
-                                            _isExecutingSnip ? null : _executeSnip,
-                                        icon: const Icon(Icons.content_cut, size: 14),
-                                        label: const Text(
-                                          'Snip',
-                                          style: TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 12,
-                                          ),
-                                        ),
-                                      ),
-                                      const SizedBox(width: 4),
-                                      IconButton(
-                                        visualDensity: VisualDensity.compact,
-                                        iconSize: 16,
-                                        tooltip: 'Cancel (Esc)',
-                                        onPressed: _cancelSnip,
-                                        icon: const Icon(
-                                          Icons.close,
-                                          color: Colors.white70,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
                                 ),
-                              ),
-                            ),
+                              );
+                            }(),
                           if (_gizmo.mode == GizmoMode.snip)
                             Positioned(
                               top: 40,
@@ -1459,11 +1757,15 @@ class _ViewportPanelState extends State<ViewportPanel> {
                                         ),
                                         const SizedBox(width: 8),
                                         Text(
-                                          _snipLineActive
-                                              ? 'Click Snip (or press Enter) to cut along the line'
-                                              : (live != null
-                                                  ? 'Drag a line across ${live.name.isEmpty ? 'the model' : live.name} to cut'
-                                                  : 'Select a model and drag a line across it to cut'),
+                                          _snipPoints.isEmpty
+                                              ? (live != null
+                                                  ? 'Click to place points or drag across ${live.name.isEmpty ? 'the model' : live.name} to snip'
+                                                  : 'Select a model and click or drag across it to snip')
+                                              : (_snipClosed
+                                                  ? 'Closed loop ready. Press Enter or click Snip to cut (${_snipPoints.length} pts)'
+                                                  : (_snipPoints.length == 1
+                                                      ? 'Click to add next point. Esc to cancel'
+                                                      : 'Click to add points, click start to close loop. Press Enter or click Snip (${_snipPoints.length} pts)')),
                                           style: const TextStyle(
                                             fontSize: 12,
                                             color: Colors.white,
@@ -1513,6 +1815,7 @@ class _ViewportPanelState extends State<ViewportPanel> {
                               _GizmoModeBar(
                                 mode: _gizmo.mode,
                                 onChanged: _setMode,
+                                onAutoSplit: _performAutoSplit,
                               ),
                               const SizedBox(width: 8),
                               _PivotModeBar(
@@ -1761,9 +2064,14 @@ class _PivotModeBar extends StatelessWidget {
 }
 
 class _GizmoModeBar extends StatelessWidget {
-  const _GizmoModeBar({required this.mode, required this.onChanged});
+  const _GizmoModeBar({
+    required this.mode,
+    required this.onChanged,
+    this.onAutoSplit,
+  });
   final GizmoMode mode;
   final void Function(GizmoMode) onChanged;
+  final VoidCallback? onAutoSplit;
 
   @override
   Widget build(BuildContext context) {
@@ -1802,6 +2110,23 @@ class _GizmoModeBar extends StatelessWidget {
             Icons.content_cut,
             'Snip tool (stretch line over model to cut) (K)',
           ),
+          if (onAutoSplit != null)
+            Tooltip(
+              message: 'Auto-split (separate parts or bisect) (Shift+K)',
+              child: InkWell(
+                onTap: onAutoSplit,
+                child: Container(
+                  width: 28,
+                  height: 24,
+                  color: Colors.black.withValues(alpha: 0.55),
+                  child: const Icon(
+                    Icons.auto_fix_high,
+                    size: 15,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -1909,74 +2234,127 @@ class _AxisGuidePainter extends CustomPainter {
 /// Renders the interactive snipping cut line, blade depth preview, and handles.
 class _SnipOverlayPainter extends CustomPainter {
   _SnipOverlayPainter({
-    required this.start,
-    required this.end,
-    required this.isActive,
+    required this.points,
+    this.hoverPoint,
+    this.isClosed = false,
     this.primaryColor = const Color(0xFF00E5FF),
   });
 
-  final Offset start;
-  final Offset end;
-  final bool isActive;
+  final List<Offset> points;
+  final Offset? hoverPoint;
+  final bool isClosed;
   final Color primaryColor;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final d = end - start;
-    final len = d.distance;
-    if (len < 1e-4) return;
+    if (points.isEmpty) return;
 
-    final dir = d / len;
-    final perp = Offset(-dir.dy, dir.dx);
+    // 1. If closed, draw translucent filled interior polygon (cookie-cutter region)
+    if (isClosed && points.length >= 3) {
+      final fillPath = Path()..moveTo(points.first.dx, points.first.dy);
+      for (var i = 1; i < points.length; i++) {
+        fillPath.lineTo(points[i].dx, points[i].dy);
+      }
+      fillPath.close();
+      canvas.drawPath(
+        fillPath,
+        Paint()
+          ..color = primaryColor.withValues(alpha: 0.12)
+          ..style = PaintingStyle.fill,
+      );
+    }
 
-    // 1. Semi-transparent blade band (gives tactile feel of a cutting plane slicing through space)
-    const bladeDepth = 28.0;
-    final bladePath = Path()
-      ..moveTo(start.dx, start.dy)
-      ..lineTo(end.dx, end.dy)
-      ..lineTo(end.dx + perp.dx * bladeDepth, end.dy + perp.dy * bladeDepth)
-      ..lineTo(start.dx + perp.dx * bladeDepth, start.dy + perp.dy * bladeDepth)
-      ..close();
+    // 2. Assemble segments to draw:
+    final segments = <(Offset, Offset)>[];
+    for (var i = 0; i < points.length - 1; i++) {
+      segments.add((points[i], points[i + 1]));
+    }
+    if (isClosed && points.length >= 3) {
+      segments.add((points.last, points.first));
+    }
 
-    final bladeGradient = ui.Gradient.linear(
-      start,
-      start + perp * bladeDepth,
-      [
-        primaryColor.withValues(alpha: 0.28),
-        primaryColor.withValues(alpha: 0.0),
-      ],
-    );
-    canvas.drawPath(bladePath, Paint()..shader = bladeGradient);
-
-    // 2. Outer glow along laser cut line
+    const bladeDepth = 24.0;
     final glowPaint = Paint()
       ..color = primaryColor.withValues(alpha: 0.45)
       ..strokeWidth = 6.0
       ..strokeCap = StrokeCap.round
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4.0);
-    canvas.drawLine(start, end, glowPaint);
 
-    // 3. Crisp core cut line
     final corePaint = Paint()
       ..color = Colors.white
       ..strokeWidth = 2.0
       ..strokeCap = StrokeCap.round;
-    canvas.drawLine(start, end, corePaint);
 
-    // 4. Direction / tick marks along blade normal
-    const tickSpacing = 24.0;
-    final numTicks = (len / tickSpacing).floor();
     final tickPaint = Paint()
       ..color = primaryColor.withValues(alpha: 0.8)
       ..strokeWidth = 1.5;
-    for (var i = 1; i <= numTicks; i++) {
-      final t = (i * tickSpacing) / len;
-      if (t > 0.95) break;
-      final pt = start + d * t;
-      canvas.drawLine(pt, pt + perp * 8.0, tickPaint);
+
+    for (final seg in segments) {
+      final start = seg.$1;
+      final end = seg.$2;
+      final d = end - start;
+      final len = d.distance;
+      if (len < 1e-4) continue;
+
+      final dir = d / len;
+      final perp = Offset(-dir.dy, dir.dx);
+
+      // Semi-transparent blade band
+      if (!isClosed) {
+        final bladePath = Path()
+          ..moveTo(start.dx, start.dy)
+          ..lineTo(end.dx, end.dy)
+          ..lineTo(end.dx + perp.dx * bladeDepth, end.dy + perp.dy * bladeDepth)
+          ..lineTo(start.dx + perp.dx * bladeDepth, start.dy + perp.dy * bladeDepth)
+          ..close();
+
+        final bladeGradient = ui.Gradient.linear(
+          start,
+          start + perp * bladeDepth,
+          [
+            primaryColor.withValues(alpha: 0.24),
+            primaryColor.withValues(alpha: 0.0),
+          ],
+        );
+        canvas.drawPath(bladePath, Paint()..shader = bladeGradient);
+      }
+
+      // Outer glow and core cut line
+      canvas.drawLine(start, end, glowPaint);
+      canvas.drawLine(start, end, corePaint);
+
+      // Tick marks along blade normal
+      const tickSpacing = 24.0;
+      final numTicks = (len / tickSpacing).floor();
+      for (var i = 1; i <= numTicks; i++) {
+        final t = (i * tickSpacing) / len;
+        if (t > 0.95) break;
+        final pt = start + d * t;
+        canvas.drawLine(pt, pt + perp * 7.0, tickPaint);
+      }
     }
 
-    // 5. Start and End handles
+    // 3. Hover preview segment (translucent preview to cursor)
+    if (!isClosed && hoverPoint != null && points.isNotEmpty) {
+      final lastPt = points.last;
+      final d = hoverPoint! - lastPt;
+      final len = d.distance;
+      if (len > 2.0) {
+        final previewGlow = Paint()
+          ..color = primaryColor.withValues(alpha: 0.3)
+          ..strokeWidth = 3.0
+          ..strokeCap = StrokeCap.round;
+        final previewCore = Paint()
+          ..color = Colors.white70
+          ..strokeWidth = 1.5
+          ..strokeCap = StrokeCap.round;
+
+        canvas.drawLine(lastPt, hoverPoint!, previewGlow);
+        canvas.drawLine(lastPt, hoverPoint!, previewCore);
+      }
+    }
+
+    // 4. Vertex handles
     final handlePaint = Paint()
       ..color = primaryColor
       ..style = PaintingStyle.fill;
@@ -1985,18 +2363,40 @@ class _SnipOverlayPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2.0;
 
-    for (final pt in [start, end]) {
+    for (var i = 0; i < points.length; i++) {
+      final pt = points[i];
+      final isStart = (i == 0);
+
+      // If hovering near start point (ready to close loop):
+      if (isStart &&
+          !isClosed &&
+          points.length >= 3 &&
+          hoverPoint != null &&
+          (hoverPoint! - pt).distance <= 18.0) {
+        canvas.drawCircle(
+          pt,
+          10.0,
+          Paint()
+            ..color = primaryColor.withValues(alpha: 0.35)
+            ..style = PaintingStyle.fill,
+        );
+        canvas.drawCircle(
+          pt,
+          10.0,
+          Paint()
+            ..color = Colors.white
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.5,
+        );
+      }
+
       canvas.drawCircle(pt, 5.0, handlePaint);
       canvas.drawCircle(pt, 5.0, handleRingPaint);
     }
   }
 
   @override
-  bool shouldRepaint(_SnipOverlayPainter oldDelegate) =>
-      start != oldDelegate.start ||
-      end != oldDelegate.end ||
-      isActive != oldDelegate.isActive ||
-      primaryColor != oldDelegate.primaryColor;
+  bool shouldRepaint(_SnipOverlayPainter oldDelegate) => true;
 }
 
 /// Original-pose restore: snaps animated (or selected) nodes back to their

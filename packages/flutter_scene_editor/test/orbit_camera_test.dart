@@ -114,4 +114,34 @@ void main() {
     expect(camera.azimuth, greaterThan(0.4));
     await gesture.up();
   });
+
+  test('camera unprojection produces points at the model depth plane', () {
+    final camera = OrbitCamera(radius: 5, azimuth: 0, elevation: 0);
+    final cam = camera.camera;
+    const viewSize = Size(800, 600);
+    final nodeCenter = Vector3(0, 0, 0);
+
+    final pt1 = const Offset(300, 300);
+    final pt2 = const Offset(500, 300);
+
+    final forward = cam.forward.normalized();
+    final worldPoints = <Vector3>[];
+    for (final pt in [pt1, pt2]) {
+      final ray = cam.screenPointToRay(pt, viewSize);
+      final rayDir = ray.direction.normalized();
+      final denom = rayDir.dot(forward);
+      final toPlane = (nodeCenter - ray.origin).dot(forward);
+      final d = denom.abs() > 1e-5 && toPlane > 0
+          ? toPlane / denom
+          : (nodeCenter - ray.origin).dot(rayDir);
+      worldPoints.add(ray.origin + rayDir * d);
+    }
+
+    expect((worldPoints[0] - nodeCenter).dot(forward), closeTo(0.0, 1e-5));
+    expect((worldPoints[1] - nodeCenter).dot(forward), closeTo(0.0, 1e-5));
+    expect(worldPoints[0].length, lessThan(2.0));
+    expect(worldPoints[1].length, lessThan(2.0));
+    expect(worldPoints[0].x, greaterThan(0.0));
+    expect(worldPoints[1].x, lessThan(0.0));
+  });
 }

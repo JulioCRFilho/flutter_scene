@@ -752,6 +752,20 @@ class _OutlinerNodeState extends State<_OutlinerNode> {
         sourceNode.instance == null &&
         sourceNode.components.any((c) => c.type == 'mesh');
 
+    bool subtreeHasMesh(LocalId id) {
+      final n = ctrl.document.nodes[id];
+      if (n == null) return false;
+      if (n.components.any((c) => c.type == 'mesh')) return true;
+      for (final childId in n.children) {
+        if (subtreeHasMesh(childId)) return true;
+      }
+      return false;
+    }
+
+    final hasMeshInSubtree = sourceNode != null &&
+        sourceNode.instance == null &&
+        subtreeHasMesh(node.id);
+
     final action = await showMenu<String>(
       context: context,
       position: RelativeRect.fromRect(
@@ -759,6 +773,13 @@ class _OutlinerNodeState extends State<_OutlinerNode> {
         Offset.zero & overlay.size,
       ),
       items: [
+        if (hasMeshInSubtree) ...[
+          const PopupMenuItem(
+            value: 'auto_split',
+            height: 34,
+            child: Text('⚡ Auto-Split (Smart)', style: itemStyle),
+          ),
+        ],
         if (hasMesh) ...[
           const PopupMenuItem(
             value: 'separate_islands',
@@ -766,12 +787,17 @@ class _OutlinerNodeState extends State<_OutlinerNode> {
             child: Text('Separate Mesh Islands', style: itemStyle),
           ),
           const PopupMenuItem(
+            value: 'separate_primitives',
+            height: 34,
+            child: Text('Separate Materials / Primitives', style: itemStyle),
+          ),
+          const PopupMenuItem(
             value: 'split_grid',
             height: 34,
             child: Text('Split Mesh by Grid...', style: itemStyle),
           ),
-          const PopupMenuDivider(height: 8),
         ],
+        if (hasMeshInSubtree) const PopupMenuDivider(height: 8),
         PopupMenuItem(
           value: 'duplicate',
           enabled: !isMember,
@@ -790,8 +816,12 @@ class _OutlinerNodeState extends State<_OutlinerNode> {
     if (!context.mounted || action == null) return;
 
     switch (action) {
+      case 'auto_split':
+        await ctrl.autoSplitMesh(node.id);
       case 'separate_islands':
         await ctrl.separateMeshIslands(node.id);
+      case 'separate_primitives':
+        await ctrl.separateMeshPrimitives(node.id);
       case 'split_grid':
         final cellSize = await promptSplitGridCellSize(context);
         if (cellSize != null && cellSize > 0) {

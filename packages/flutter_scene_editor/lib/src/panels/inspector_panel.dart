@@ -621,9 +621,19 @@ class _ComponentSection extends StatelessWidget {
       items: [
         if (canSeparateOrSplit) ...[
           const PopupMenuItem(
+            value: 'auto_split',
+            height: 34,
+            child: Text('⚡ Auto-Split Mesh', style: itemStyle),
+          ),
+          const PopupMenuItem(
             value: 'separate_islands',
             height: 34,
             child: Text('Separate Mesh Islands', style: itemStyle),
+          ),
+          const PopupMenuItem(
+            value: 'separate_primitives',
+            height: 34,
+            child: Text('Separate Materials / Primitives', style: itemStyle),
           ),
           const PopupMenuItem(
             value: 'split_grid',
@@ -654,10 +664,22 @@ class _ComponentSection extends StatelessWidget {
     );
     if (!context.mounted || action == null) return;
     switch (action) {
+      case 'auto_split':
+        for (final n in nodes) {
+          if (!controller.isPrefabMember(n.id)) {
+            await controller.autoSplitMesh(n.id);
+          }
+        }
       case 'separate_islands':
         for (final n in nodes) {
           if (!controller.isPrefabMember(n.id)) {
             await controller.separateMeshIslands(n.id);
+          }
+        }
+      case 'separate_primitives':
+        for (final n in nodes) {
+          if (!controller.isPrefabMember(n.id)) {
+            await controller.separateMeshPrimitives(n.id);
           }
         }
       case 'split_grid':

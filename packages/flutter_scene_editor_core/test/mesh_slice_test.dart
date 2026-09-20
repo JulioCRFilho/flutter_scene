@@ -230,4 +230,209 @@ void main() {
       );
     });
   });
+
+  group('sliceMeshByPolyline', () {
+    test('slices a mesh along an open multi-point polyline', () {
+      final h = _harness();
+      // 4 quads along X: [0, 1], [1, 2], [2, 3], [3, 4]
+      final id = _addStripNode(h.doc, quads: 4, name: 'Model');
+
+      // Polyline with 3 points: (2.0, -1, 0) -> (2.5, 0.5, 0) -> (2.0, 2, 0)
+      _run(h, 'sliceMeshByPolyline', {
+        'nodeId': id.toToken(),
+        'points': [
+          [2.0, -1.0, 0.0],
+          [2.5, 0.5, 0.0],
+          [2.0, 2.0, 0.0],
+        ],
+        'viewDirection': [0.0, 0.0, 1.0],
+        'partName': 'Model_polycut',
+      });
+
+      expect(h.doc.roots, hasLength(2));
+      final twinId = h.doc.roots[1];
+      expect(h.doc.nodes[twinId]!.name, 'Model_polycut');
+    });
+
+    test('slices a mesh with a closed polygon (cookie cutter / lasso)', () {
+      final h = _harness();
+      final id = _addStripNode(h.doc, quads: 4, name: 'Canvas');
+
+      // Closed polygon enclosing the first quad [0, 1]
+      _run(h, 'sliceMeshByPolyline', {
+        'nodeId': id.toToken(),
+        'points': [
+          [-0.5, -0.5, 0.0],
+          [1.1, -0.5, 0.0],
+          [1.1, 1.5, 0.0],
+          [-0.5, 1.5, 0.0],
+        ],
+        'viewDirection': [0.0, 0.0, 1.0],
+        'isClosed': true,
+        'partName': 'Canvas_lasso',
+      });
+
+      expect(h.doc.roots, hasLength(2));
+      final twinId = h.doc.roots[1];
+      expect(h.doc.nodes[twinId]!.name, 'Canvas_lasso');
+    });
+  });
+
+  group('autoSplitMesh', () {
+    test('auto-bisects a single solid continuous mesh along its longest axis', () {
+      final h = _harness();
+      // 4 quads along X: [0, 1], [1, 2], [2, 3], [3, 4]. Longest axis is X.
+      final id = _addStripNode(h.doc, quads: 4, name: 'SolidBlock');
+
+      final tx = _run(h, 'autoSplitMesh', {
+        'nodeId': id.toToken(),
+      });
+
+      expect(tx.records, isNotEmpty);
+      expect(h.doc.roots, hasLength(2));
+      final twinId = h.doc.roots[1];
+      expect(h.doc.nodes[twinId]!.name, 'SolidBlock_cut');
+
+      // Undo/redo works
+      h.history.undo();
+      expect(h.doc.roots, hasLength(1));
+      h.history.redo();
+      expect(h.doc.roots, hasLength(2));
+    });
+
+    test('separates disconnected topological islands / loose parts', () {
+      final h = _harness();
+
+      // Build 2 disconnected quads (8 vertices, 4 triangles)
+      const vertexCount = 8;
+      final soa = Float32List(vertexCount * _floatsPerVertex);
+      // Quad 0: verts 0..3 (x in [0, 1])
+      soa[0] = 0.0; soa[1] = 0.0; soa[2] = 0.0;
+      soa[3] = 0.0; soa[4] = 0.0; soa[5] = 1.0;
+      soa[6] = 1.0; soa[7] = 0.0; soa[8] = 0.0;
+      soa[9] = 1.0; soa[10] = 0.0; soa[11] = 1.0;
+      // Quad 1: verts 4..7 (x in [5, 6], disconnected door/window)
+      soa[12] = 5.0; soa[13] = 0.0; soa[14] = 0.0;
+      soa[15] = 5.0; soa[16] = 0.0; soa[17] = 1.0;
+      soa[18] = 6.0; soa[19] = 0.0; soa[20] = 0.0;
+      soa[21] = 6.0; soa[22] = 0.0; soa[23] = 1.0;
+
+      final indices = Uint16List.fromList([
+        0, 2, 3, 0, 3, 1,
+        4, 6, 7, 4, 7, 5,
+      ]);
+
+      final vp = h.doc.addPayload(
+        PayloadSpec(
+          h.doc.newId(),
+          encoding: PayloadEncoding.vertexBuffer,
+          layout: 'unskinned_soa_uv1_tangent',
+          bytes: soa.buffer.asUint8List(),
+          length: soa.buffer.lengthInBytes,
+        ),
+      );
+      final ip = h.doc.addPayload(
+        PayloadSpec(
+          h.doc.newId(),
+          encoding: PayloadEncoding.indexBuffer,
+          format: 'uint16',
+          bytes: indices.buffer.asUint8List(),
+          length: indices.buffer.lengthInBytes,
+        ),
+      );
+      final geom = GeometryResource(
+        h.doc.newId(),
+        vertices: vp.id,
+        indices: ip.id,
+        legacyWinding: true,
+      );
+      h.doc.resources[geom.id] = geom;
+      final mat = MaterialResource(h.doc.newId(), type: 'physicallyBased');
+      h.doc.resources[mat.id] = mat;
+
+      final building = h.doc.createNode(name: 'Building', root: true);
+      building.components.add(
+        ComponentSpec(
+          'mesh',
+          properties: {
+            'geometry': ResourceRefValue(geom.id),
+            'material': ResourceRefValue(mat.id),
+          },
+        ),
+      );
+
+      final tx = _run(h, 'autoSplitMesh', {
+        'nodeId': building.id.toToken(),
+      });
+
+      expect(tx.records, isNotEmpty);
+      // The split part should become a CHILD of the building node, not a
+      // sibling at root level.
+      expect(h.doc.roots, hasLength(1)); // still only the original root
+      expect(building.children, hasLength(1));
+      final doorPartId = building.children.first;
+      expect(h.doc.nodes[doorPartId]!.name, 'Building_part1');
+    });
+
+    test('traverses hierarchy when auto-split is called on a parent group node', () {
+      final h = _harness();
+      final rootGroup = h.doc.createNode(name: 'HouseGroup', root: true);
+      final childMesh = _addStripNode(h.doc, quads: 4, name: 'Wall');
+      h.doc.roots.remove(childMesh);
+      rootGroup.children.add(childMesh);
+
+      final tx = _run(h, 'autoSplitMesh', {
+        'nodeId': rootGroup.id.toToken(),
+      });
+
+      expect(tx.records, isNotEmpty);
+      // Wall (a child of HouseGroup) should be bisected; the bisected twin
+      // becomes a sibling next to Wall inside HouseGroup (via sliceMeshByPlane).
+      expect(rootGroup.children, hasLength(2));
+    });
+
+    test('separates multi-primitive meshes (e.g. doors, windows, walls by material)', () {
+      final h = _harness();
+
+      // Create two geometries: g1 (walls), g2 (windows)
+      final n1 = _addStripNode(h.doc, quads: 2, name: 'Temp1');
+      final n2 = _addStripNode(h.doc, quads: 2, name: 'Temp2');
+      final c1 = h.doc.nodes[n1]!.components.firstWhere((c) => c.type == 'mesh');
+      final c2 = h.doc.nodes[n2]!.components.firstWhere((c) => c.type == 'mesh');
+      final geom1 = c1.properties['geometry']!;
+      final mat1 = c1.properties['material']!;
+      final geom2 = c2.properties['geometry']!;
+      final mat2 = c2.properties['material']!;
+
+      h.doc.nodes.remove(n1);
+      h.doc.roots.remove(n1);
+      h.doc.nodes.remove(n2);
+      h.doc.roots.remove(n2);
+
+      // Create building node with 2 primitives: wall & window
+      final building = h.doc.createNode(name: 'House', root: true);
+      building.components.add(
+        ComponentSpec(
+          'mesh',
+          properties: {
+            'primitives': ListValue([
+              MapValue({'geometry': geom1, 'material': mat1}),
+              MapValue({'geometry': geom2, 'material': mat2}),
+            ]),
+          },
+        ),
+      );
+
+      final tx = _run(h, 'autoSplitMesh', {
+        'nodeId': building.id.toToken(),
+      });
+
+      expect(tx.records, isNotEmpty);
+      // Primitive-1 becomes a CHILD of the house node, not a sibling at root.
+      expect(h.doc.roots, hasLength(1));
+      expect(building.children, hasLength(1));
+      final twinId = building.children.first;
+      expect(h.doc.nodes[twinId]!.name, 'House_prim1');
+    });
+  });
 }
