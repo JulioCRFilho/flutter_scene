@@ -1422,6 +1422,126 @@ class EditorToolSurface {
       description: 'Redo the last undone edit.',
       inputSchema: {'type': 'object', 'properties': {}},
     ),
+    ToolDefinition(
+      name: 'separate_mesh_islands',
+      description:
+          'Separate disconnected topological components (islands) of a node\'s '
+          'mesh into individual twin nodes beside it in the hierarchy.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'node': {
+            'type': 'string',
+            'description':
+                'A node slash path (Root/Cube) or id token with a mesh component.',
+          },
+          'primitiveIndex': {
+            'type': 'integer',
+            'description':
+                'Which primitive index in the mesh to separate (default 0).',
+          },
+          'recenterPivot': {
+            'type': 'boolean',
+            'description':
+                'Whether to recenter each twin node\'s pivot to its island\'s '
+                'bounding box center (default true).',
+          },
+          'edgeConnected': {
+            'type': 'boolean',
+            'description':
+                'If true (default), triangles must share an edge to be '
+                'connected; if false, sharing a single vertex is sufficient.',
+          },
+        },
+        'required': ['node'],
+        'additionalProperties': false,
+      },
+    ),
+    ToolDefinition(
+      name: 'split_mesh_selection',
+      description:
+          'Split selected triangles out of a node\'s mesh into a new twin '
+          'node beside it in the hierarchy.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'node': {
+            'type': 'string',
+            'description':
+                'A node slash path (Root/Cube) or id token with a mesh component.',
+          },
+          'selectedTriangles': {
+            'type': 'array',
+            'items': {'type': 'integer'},
+            'description':
+                'Triangle indices to carve out into the twin node.',
+          },
+          'primitiveIndex': {
+            'type': 'integer',
+            'description':
+                'Which primitive index in the mesh to split (default 0).',
+          },
+          'recenterPivot': {
+            'type': 'boolean',
+            'description':
+                'Whether to recenter each node\'s pivot to its new geometry '
+                'bounds (default true).',
+          },
+          'partName': {
+            'type': 'string',
+            'description': 'Optional name for the newly created twin node.',
+          },
+        },
+        'required': ['node', 'selectedTriangles'],
+        'additionalProperties': false,
+      },
+    ),
+    ToolDefinition(
+      name: 'slice_mesh_plane',
+      description:
+          'Slice a node\'s mesh along a 3D cutting plane into two parts: '
+          'the original node retains the geometry on one side of the plane, '
+          'and a new sibling twin node receives the geometry on the other side.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'node': {
+            'type': 'string',
+            'description':
+                'A node slash path (Root/Cube) or id token with a mesh component.',
+          },
+          'planePoint': {
+            'type': 'array',
+            'items': {'type': 'number'},
+            'description':
+                'A 3D world-space point [x, y, z] lying on the cutting plane.',
+          },
+          'planeNormal': {
+            'type': 'array',
+            'items': {'type': 'number'},
+            'description':
+                'The 3D world-space normal vector [nx, ny, nz] of the cutting plane.',
+          },
+          'primitiveIndex': {
+            'type': 'integer',
+            'description':
+                'Which primitive index in the mesh to slice (default 0).',
+          },
+          'recenterPivot': {
+            'type': 'boolean',
+            'description':
+                'Whether to recenter the twin node\'s pivot to its piece\'s '
+                'bounding box center (default true).',
+          },
+          'partName': {
+            'type': 'string',
+            'description': 'Optional name for the newly created twin node.',
+          },
+        },
+        'required': ['node', 'planePoint', 'planeNormal'],
+        'additionalProperties': false,
+      },
+    ),
   ];
 
   /// Dispatches a tool call, returning a JSON-encodable result. Throws a
@@ -1730,6 +1850,12 @@ class EditorToolSurface {
         return {'commands': _searchCommands(args['query'] as String? ?? '')};
       case 'run_command':
         return _runCommand(args);
+      case 'separate_mesh_islands':
+        return _separateMeshIslands(args);
+      case 'split_mesh_selection':
+        return _splitMeshSelection(args);
+      case 'slice_mesh_plane':
+        return _sliceMeshPlane(args);
       case 'undo':
         final undone = await (undoRunner?.call() ?? Future.value(_undoHere()));
         return {'undone': undone, 'canUndo': session.history.canUndo};
@@ -2064,19 +2190,10 @@ class EditorToolSurface {
     };
   }
 
-  Future<Map<String, Object?>> _runCommand(Map<String, Object?> args) async {
-    final command = args['command'];
-    if (command is! String) {
-      throw const ToolError('run_command needs a string "command"');
-    }
-    final params =
-        (args['params'] as Map?)?.cast<String, Object?>() ?? const {};
-    if (command == 'undo' || command == 'redo') {
-      throw ToolError(
-        '"$command" is a top-level tool; call it directly rather than '
-        'through run_command',
-      );
-    }
+  Future<Map<String, Object?>> _dispatchCommand(
+    String command,
+    Map<String, Object?> params,
+  ) async {
     try {
       final transaction = commandRunner != null
           ? await commandRunner!(command, params)
@@ -2096,6 +2213,166 @@ class EditorToolSurface {
     } on ArgumentError catch (e) {
       throw ToolError('${e.message}');
     }
+  }
+
+  Future<Map<String, Object?>> _runCommand(Map<String, Object?> args) async {
+    final command = args['command'];
+    if (command is! String) {
+      throw const ToolError('run_command needs a string "command"');
+    }
+    final params =
+        (args['params'] as Map?)?.cast<String, Object?>() ?? const {};
+    if (command == 'undo' || command == 'redo') {
+      throw ToolError(
+        '"$command" is a top-level tool; call it directly rather than '
+        'through run_command',
+      );
+    }
+    return _dispatchCommand(command, params);
+  }
+
+  Future<Map<String, Object?>> _separateMeshIslands(
+    Map<String, Object?> args,
+  ) async {
+    final nodeArg = args['node'] ?? args['ref'];
+    if (nodeArg is! String || nodeArg.isEmpty) {
+      throw const ToolError(
+        'separate_mesh_islands needs a node "node" (slash path or id token)',
+      );
+    }
+    final node = _resolve(nodeArg);
+    final primitiveIndex = args['primitiveIndex'];
+    if (primitiveIndex != null && primitiveIndex is! int) {
+      throw const ToolError('"primitiveIndex" must be an integer');
+    }
+    final recenterPivot = args['recenterPivot'];
+    if (recenterPivot != null && recenterPivot is! bool) {
+      throw const ToolError('"recenterPivot" must be a boolean');
+    }
+    final edgeConnected = args['edgeConnected'];
+    if (edgeConnected != null && edgeConnected is! bool) {
+      throw const ToolError('"edgeConnected" must be a boolean');
+    }
+
+    final params = <String, Object?>{
+      'nodeId': node.id.toToken(),
+      if (primitiveIndex is int) 'primitiveIndex': primitiveIndex,
+      if (recenterPivot is bool) 'recenterPivot': recenterPivot,
+      if (edgeConnected is bool) 'edgeConnected': edgeConnected,
+    };
+    return _dispatchCommand('separateMeshIslands', params);
+  }
+
+  Future<Map<String, Object?>> _splitMeshSelection(
+    Map<String, Object?> args,
+  ) async {
+    final nodeArg = args['node'] ?? args['ref'];
+    if (nodeArg is! String || nodeArg.isEmpty) {
+      throw const ToolError(
+        'split_mesh_selection needs a node "node" (slash path or id token)',
+      );
+    }
+    final node = _resolve(nodeArg);
+    final trianglesRaw = args['selectedTriangles'] ?? args['triangles'];
+    if (trianglesRaw is! List) {
+      throw const ToolError(
+        'split_mesh_selection needs a list of "selectedTriangles"',
+      );
+    }
+    final triangles = <int>[];
+    for (final item in trianglesRaw) {
+      if (item is num) {
+        triangles.add(item.toInt());
+      } else {
+        throw const ToolError('Each triangle index must be an integer');
+      }
+    }
+    final primitiveIndex = args['primitiveIndex'];
+    if (primitiveIndex != null && primitiveIndex is! int) {
+      throw const ToolError('"primitiveIndex" must be an integer');
+    }
+    final recenterPivot = args['recenterPivot'];
+    if (recenterPivot != null && recenterPivot is! bool) {
+      throw const ToolError('"recenterPivot" must be a boolean');
+    }
+    final partName = args['partName'];
+    if (partName != null && (partName is! String || partName.isEmpty)) {
+      throw const ToolError('"partName" must be a non-empty string');
+    }
+
+    final params = <String, Object?>{
+      'nodeId': node.id.toToken(),
+      'selectedTriangles': triangles,
+      if (primitiveIndex is int) 'primitiveIndex': primitiveIndex,
+      if (recenterPivot is bool) 'recenterPivot': recenterPivot,
+      if (partName is String && partName.isNotEmpty) 'partName': partName,
+    };
+    return _dispatchCommand('splitMeshBySelection', params);
+  }
+
+  Future<Map<String, Object?>> _sliceMeshPlane(
+    Map<String, Object?> args,
+  ) async {
+    final nodeArg = args['node'] ?? args['ref'];
+    if (nodeArg is! String || nodeArg.isEmpty) {
+      throw const ToolError(
+        'slice_mesh_plane needs a node "node" (slash path or id token)',
+      );
+    }
+    final node = _resolve(nodeArg);
+
+    List<double> parseVec3(Object? raw, String fieldName) {
+      if (raw is List &&
+          raw.length >= 3 &&
+          raw[0] is num &&
+          raw[1] is num &&
+          raw[2] is num) {
+        return [
+          (raw[0] as num).toDouble(),
+          (raw[1] as num).toDouble(),
+          (raw[2] as num).toDouble(),
+        ];
+      }
+      if (raw is Map &&
+          raw['x'] is num &&
+          raw['y'] is num &&
+          raw['z'] is num) {
+        return [
+          (raw['x'] as num).toDouble(),
+          (raw['y'] as num).toDouble(),
+          (raw['z'] as num).toDouble(),
+        ];
+      }
+      throw ToolError(
+        'slice_mesh_plane needs "$fieldName" as [x, y, z] or {x, y, z}',
+      );
+    }
+
+    final planePoint = parseVec3(args['planePoint'], 'planePoint');
+    final planeNormal = parseVec3(args['planeNormal'], 'planeNormal');
+
+    final primitiveIndex = args['primitiveIndex'];
+    if (primitiveIndex != null && primitiveIndex is! int) {
+      throw const ToolError('"primitiveIndex" must be an integer');
+    }
+    final recenterPivot = args['recenterPivot'];
+    if (recenterPivot != null && recenterPivot is! bool) {
+      throw const ToolError('"recenterPivot" must be a boolean');
+    }
+    final partName = args['partName'];
+    if (partName != null && (partName is! String || partName.isEmpty)) {
+      throw const ToolError('"partName" must be a non-empty string');
+    }
+
+    final params = <String, Object?>{
+      'nodeId': node.id.toToken(),
+      'planePoint': planePoint,
+      'planeNormal': planeNormal,
+      if (primitiveIndex is int) 'primitiveIndex': primitiveIndex,
+      if (recenterPivot is bool) 'recenterPivot': recenterPivot,
+      if (partName is String && partName.isNotEmpty) 'partName': partName,
+    };
+    return _dispatchCommand('sliceMeshByPlane', params);
   }
 
   /// The entities [transaction] brought into existence, as

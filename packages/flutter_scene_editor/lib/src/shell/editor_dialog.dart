@@ -31,3 +31,57 @@ Future<T?> showEditorDialog<T>(
     ),
   );
 }
+
+/// Prompts for the spatial grid cell size (world units) for mesh splitting.
+Future<double?> promptSplitGridCellSize(BuildContext context) {
+  final textCtrl = TextEditingController(text: '10.0');
+  return showEditorDialog<double>(
+    context,
+    builder: (context) => AlertDialog(
+      title: const Text('Split Mesh by Grid'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Divides the mesh into spatial cells of the specified size. '
+            'Each cell with geometry becomes an independent twin node.',
+            style: TextStyle(fontSize: 12),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: textCtrl,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: 'Cell size (world units)',
+              border: OutlineInputBorder(),
+            ),
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            onSubmitted: (value) {
+              final parsed = double.tryParse(value);
+              if (parsed != null && parsed > 0) {
+                Navigator.of(context).pop(parsed);
+              }
+            },
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: () {
+            final parsed = double.tryParse(textCtrl.text);
+            if (parsed != null && parsed > 0) {
+              Navigator.of(context).pop(parsed);
+            }
+          },
+          child: const Text('Split'),
+        ),
+      ],
+    ),
+  );
+}
+

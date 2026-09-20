@@ -73,8 +73,24 @@ double requireDouble(Map<String, Object?> params, String key) {
 
 /// Reads a required `{x, y, z}` vector [key].
 Vector3 requireVec3(Map<String, Object?> params, String key) {
-  final m = _requireObject(params, key);
-  return Vector3(_num(m, key, 'x'), _num(m, key, 'y'), _num(m, key, 'z'));
+  final v = _get(params, key);
+  if (v == null) _missing(key);
+  if (v is Vector3) return v;
+  if (v is List && v.length >= 3) {
+    if (v[0] is! num || v[1] is! num || v[2] is! num) {
+      throw CommandException('Param $key must contain numbers');
+    }
+    return Vector3(
+      (v[0] as num).toDouble(),
+      (v[1] as num).toDouble(),
+      (v[2] as num).toDouble(),
+    );
+  }
+  if (v is Map) {
+    final m = _requireObject(params, key);
+    return Vector3(_num(m, key, 'x'), _num(m, key, 'y'), _num(m, key, 'z'));
+  }
+  throw CommandException('Param $key must be a Vector3, list of 3 numbers, or {x, y, z} object');
 }
 
 /// Reads an optional `{x, y, z}` vector [key], or null when absent.

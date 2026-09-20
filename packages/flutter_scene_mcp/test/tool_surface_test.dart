@@ -1640,4 +1640,205 @@ void documentTests() {
       expect(applied.last.$2, isEmpty);
     });
   });
+
+  group('mesh splitting tools', () {
+    test('bootstrap surface offers separate_mesh_islands, split_mesh_selection, and slice_mesh_plane', () {
+      final surface = _surface();
+      final names = surface.bootstrapTools().map((t) => t.name).toSet();
+      expect(names, contains('separate_mesh_islands'));
+      expect(names, contains('split_mesh_selection'));
+      expect(names, contains('slice_mesh_plane'));
+    });
+
+    test('separate_mesh_islands and split_mesh_selection dispatch correctly', () async {
+      final session = EditorSession(
+        SceneDocument(allocator: IdAllocator(session: 1)),
+      );
+      final doc = session.document;
+
+      // Build a 2-island mesh: quad 0 (verts 0,1,2,3) and quad 1 (verts 4,5,6,7).
+      const vertexCount = 8;
+      final soa = Float32List(vertexCount * 18);
+      for (var v = 0; v < 4; v++) {
+        soa[v * 3] = 0.0;
+        soa[v * 3 + 1] = 0.0;
+        soa[v * 3 + 2] = v.toDouble();
+      }
+      for (var v = 4; v < 8; v++) {
+        soa[v * 3] = 10.0;
+        soa[v * 3 + 1] = 0.0;
+        soa[v * 3 + 2] = (v - 4).toDouble();
+      }
+      final indices = Uint16List.fromList([
+        0, 1, 2, 0, 2, 3, // island 1 (triangles 0, 1)
+        4, 5, 6, 4, 6, 7, // island 2 (triangles 2, 3)
+      ]);
+
+      final vp = doc.addPayload(
+        PayloadSpec(
+          doc.newId(),
+          encoding: PayloadEncoding.vertexBuffer,
+          layout: 'unskinned_soa_uv1_tangent',
+          bytes: soa.buffer.asUint8List(),
+          length: soa.buffer.lengthInBytes,
+        ),
+      );
+      final ip = doc.addPayload(
+        PayloadSpec(
+          doc.newId(),
+          encoding: PayloadEncoding.indexBuffer,
+          format: 'uint16',
+          bytes: indices.buffer.asUint8List(),
+          length: indices.buffer.lengthInBytes,
+        ),
+      );
+      final geom = GeometryResource(
+        doc.newId(),
+        vertices: vp.id,
+        indices: ip.id,
+        legacyWinding: true,
+      );
+      doc.resources[geom.id] = geom;
+      final mat = MaterialResource(doc.newId(), type: 'physicallyBased');
+      doc.resources[mat.id] = mat;
+
+      final node = doc.createNode(name: 'Building', root: true);
+      node.components.add(
+        ComponentSpec(
+          'mesh',
+          properties: {
+            'geometry': ResourceRefValue(geom.id),
+            'material': ResourceRefValue(mat.id),
+          },
+        ),
+      );
+
+      final surface = EditorToolSurface.of(session);
+
+      // 1. Test split_mesh_selection: carve triangles 0, 1 into a twin node.
+      final splitResult = await surface.dispatch('split_mesh_selection', {
+        'node': 'Building',
+        'selectedTriangles': [0, 1],
+        'partName': 'Building_Wing',
+      });
+      expect(splitResult['ok'], isTrue);
+      expect(splitResult['applied'], 'Split mesh by selection');
+      expect((splitResult['created'] as List).isNotEmpty, isTrue);
+
+      final wingNode = doc.nodes.values.firstWhere(
+        (n) => n.name == 'Building_Wing',
+      );
+      expect(wingNode.components.any((c) => c.type == 'mesh'), isTrue);
+
+      // 2. Test separate_mesh_islands on the remaining node.
+      final islandResult = await surface.dispatch('separate_mesh_islands', {
+        'node': 'Building',
+      });
+      expect(islandResult['ok'], isTrue);
+      expect(islandResult['applied'], 'Separate mesh islands');
+
+      // 3. Error handling: invalid node.
+      expect(
+        () => surface.dispatch('separate_mesh_islands', {'node': 'NonExistent'}),
+        throwsA(isA<ToolError>()),
+      );
+
+      // 4. Error handling: node without mesh.
+      final emptyNode = doc.createNode(name: 'EmptyNode', root: true);
+      expect(
+        () => surface.dispatch('separate_mesh_islands', {'node': emptyNode.name}),
+        throwsA(isA<ToolError>()),
+      );
+    });
+
+    test('slice_mesh_plane dispatches correctly', () async {
+      final session = EditorSession(
+        SceneDocument(allocator: IdAllocator(session: 1)),
+      );
+      final doc = session.document;
+
+      // Build a 2-triangle quad spanning x in [-2, 2].
+      // Tri 0: (-2, 0, 0), (-2, 0, 1), (2, 0, 0) -> centroid x = -2/3 < 0
+      // Tri 1: (-2, 0, 1), (2, 0, 1), (2, 0, 0) -> centroid x = 2/3 > 0
+      const vertexCount = 4;
+      final soa = Float32List(vertexCount * 18);
+      // v0: (-2, 0, 0)
+      soa[0] = -2.0; soa[1] = 0.0; soa[2] = 0.0;
+      // v1: (-2, 0, 1)
+      soa[3] = -2.0; soa[4] = 0.0; soa[5] = 1.0;
+      // v2: (2, 0, 0)
+      soa[6] = 2.0; soa[7] = 0.0; soa[8] = 0.0;
+      // v3: (2, 0, 1)
+      soa[9] = 2.0; soa[10] = 0.0; soa[11] = 1.0;
+
+      final indices = Uint16List.fromList([0, 1, 2, 1, 3, 2]);
+
+      final vp = doc.addPayload(
+        PayloadSpec(
+          doc.newId(),
+          encoding: PayloadEncoding.vertexBuffer,
+          layout: 'unskinned_soa_uv1_tangent',
+          bytes: soa.buffer.asUint8List(),
+          length: soa.buffer.lengthInBytes,
+        ),
+      );
+      final ip = doc.addPayload(
+        PayloadSpec(
+          doc.newId(),
+          encoding: PayloadEncoding.indexBuffer,
+          format: 'uint16',
+          bytes: indices.buffer.asUint8List(),
+          length: indices.buffer.lengthInBytes,
+        ),
+      );
+      final geom = GeometryResource(
+        doc.newId(),
+        vertices: vp.id,
+        indices: ip.id,
+        legacyWinding: true,
+      );
+      doc.resources[geom.id] = geom;
+      final mat = MaterialResource(doc.newId(), type: 'physicallyBased');
+      doc.resources[mat.id] = mat;
+
+      final node = doc.createNode(name: 'Bread', root: true);
+      node.components.add(
+        ComponentSpec(
+          'mesh',
+          properties: {
+            'geometry': ResourceRefValue(geom.id),
+            'material': ResourceRefValue(mat.id),
+          },
+        ),
+      );
+
+      final surface = EditorToolSurface.of(session);
+
+      // Slice through x = 0 with normal (1, 0, 0).
+      final sliceResult = await surface.dispatch('slice_mesh_plane', {
+        'node': 'Bread',
+        'planePoint': [0.0, 0.0, 0.0],
+        'planeNormal': [1.0, 0.0, 0.0],
+        'partName': 'Bread_Cut',
+      });
+      expect(sliceResult['ok'], isTrue);
+      expect(sliceResult['applied'], 'Slice mesh by plane');
+      expect((sliceResult['created'] as List).isNotEmpty, isTrue);
+
+      final cutNode = doc.nodes.values.firstWhere(
+        (n) => n.name == 'Bread_Cut',
+      );
+      expect(cutNode.components.any((c) => c.type == 'mesh'), isTrue);
+
+      // Error handling: invalid node.
+      expect(
+        () => surface.dispatch('slice_mesh_plane', {
+          'node': 'NonExistent',
+          'planePoint': [0.0, 0.0, 0.0],
+          'planeNormal': [1.0, 0.0, 0.0],
+        }),
+        throwsA(isA<ToolError>()),
+      );
+    });
+  });
 }

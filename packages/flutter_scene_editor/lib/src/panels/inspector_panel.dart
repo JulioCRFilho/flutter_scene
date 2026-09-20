@@ -604,6 +604,13 @@ class _ComponentSection extends StatelessWidget {
     final sourcePath = controller.componentSourcePaths[type];
     final overlay =
         Overlay.of(context).context.findRenderObject()! as RenderBox;
+    final canSeparateOrSplit = type == 'mesh' &&
+        nodes.any((n) {
+          final src = controller.document.nodes[n.id];
+          return src != null &&
+              src.instance == null &&
+              src.components.any((c) => c.type == 'mesh');
+        });
     const itemStyle = TextStyle(fontSize: 12);
     final action = await showMenu<String>(
       context: context,
@@ -612,6 +619,19 @@ class _ComponentSection extends StatelessWidget {
         Offset.zero & overlay.size,
       ),
       items: [
+        if (canSeparateOrSplit) ...[
+          const PopupMenuItem(
+            value: 'separate_islands',
+            height: 34,
+            child: Text('Separate Mesh Islands', style: itemStyle),
+          ),
+          const PopupMenuItem(
+            value: 'split_grid',
+            height: 34,
+            child: Text('Split Mesh by Grid...', style: itemStyle),
+          ),
+          const PopupMenuDivider(height: 8),
+        ],
         PopupMenuItem(
           value: 'copy',
           enabled: sourcePath != null,
@@ -632,7 +652,25 @@ class _ComponentSection extends StatelessWidget {
         ),
       ],
     );
+    if (!context.mounted || action == null) return;
     switch (action) {
+      case 'separate_islands':
+        for (final n in nodes) {
+          if (!controller.isPrefabMember(n.id)) {
+            await controller.separateMeshIslands(n.id);
+          }
+        }
+      case 'split_grid':
+        final cellSize = await promptSplitGridCellSize(context);
+        if (cellSize != null && cellSize > 0) {
+          final targetIds = [
+            for (final n in nodes)
+              if (!controller.isPrefabMember(n.id)) n.id,
+          ];
+          if (targetIds.isNotEmpty) {
+            await controller.splitMeshByGrid(targetIds, cellSize: cellSize);
+          }
+        }
       case 'copy':
         await Clipboard.setData(ClipboardData(text: sourcePath!));
       case 'open':

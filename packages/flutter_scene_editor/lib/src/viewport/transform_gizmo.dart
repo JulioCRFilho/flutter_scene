@@ -13,7 +13,7 @@ const int axisZ = 2;
 const int axisUniform = 3;
 
 /// The transform the gizmo edits.
-enum GizmoMode { translate, rotate, scale }
+enum GizmoMode { translate, rotate, scale, snip }
 
 /// The coordinate space used to orient and apply a transform gizmo.
 enum TransformSpace { global, local }
@@ -135,6 +135,7 @@ class TransformGizmoPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    if (mode == GizmoMode.snip) return;
     final originScreen = projectToScreen(origin, camera, size);
     if (originScreen == null) return;
     final scale = _gizmoScale(origin, camera, size) * _armGlobalUnits;
@@ -146,6 +147,8 @@ class TransformGizmoPainter extends CustomPainter {
         _paintRings(canvas, size, scale);
       case GizmoMode.scale:
         _paintScaleHandles(canvas, size, originScreen, scale);
+      case GizmoMode.snip:
+        return;
     }
     canvas.drawCircle(
       originScreen,
@@ -275,6 +278,7 @@ class GizmoController {
     Camera camera,
     Size size,
   ) {
+    if (mode == GizmoMode.snip) return false;
     final originScreen = projectToScreen(origin, camera, size);
     if (originScreen == null) return false;
     final scaleLen = _gizmoScale(origin, camera, size) * _armGlobalUnits;
@@ -348,6 +352,8 @@ class GizmoController {
         _updateRotate(pos, origin, camera);
       case GizmoMode.scale:
         _updateScale(pos, axis);
+      case GizmoMode.snip:
+        break;
     }
     _lastPos = pos;
   }

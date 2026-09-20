@@ -90,6 +90,15 @@ export 'src/mesh_grid_split.dart'
         isPayloadReferenced,
         splitTriangleMeshByGrid,
         splittableVertexLayouts;
+export 'src/mesh_partition.dart'
+    show
+        MeshPartitionPiece,
+        MeshPartitionResult,
+        findAllConnectedIslands,
+        findConnectedIsland,
+        findTrianglesInConvexVolume,
+        partitionTriangleMesh,
+        partitionableVertexLayouts;
 export 'src/binary/fsceneb.dart'
     show FscenebFormatException, kFscenebVersion, readFsceneb, writeFsceneb;
 export 'src/json/fscene_json.dart'

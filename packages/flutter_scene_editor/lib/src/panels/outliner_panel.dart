@@ -9,6 +9,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 
 import '../controller/editor_controller.dart';
+import '../shell/editor_dialog.dart';
 import 'floating_property_panel.dart';
 
 /// Scene-tree outliner panel.
@@ -663,6 +664,8 @@ class _OutlinerNodeState extends State<_OutlinerNode> {
 
     rowContent = InkWell(
       onTap: () => _handleTap(ctrl, node.id),
+      onSecondaryTapUp: (details) =>
+          _showContextMenu(context, ctrl, details.globalPosition),
       child: rowContent,
     );
 
@@ -729,6 +732,76 @@ class _OutlinerNodeState extends State<_OutlinerNode> {
     );
 
     return row;
+  }
+
+  Future<void> _showContextMenu(
+    BuildContext context,
+    EditorController ctrl,
+    Offset position,
+  ) async {
+    final node = widget.node;
+    if (!ctrl.selection.contains(node.id)) {
+      ctrl.selection.selectOnly(node.id);
+    }
+    final overlay =
+        Overlay.of(context).context.findRenderObject()! as RenderBox;
+    const itemStyle = TextStyle(fontSize: 12);
+    final isMember = ctrl.isPrefabMember(node.id);
+    final sourceNode = ctrl.document.nodes[node.id];
+    final hasMesh = sourceNode != null &&
+        sourceNode.instance == null &&
+        sourceNode.components.any((c) => c.type == 'mesh');
+
+    final action = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        position & const Size(1, 1),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        if (hasMesh) ...[
+          const PopupMenuItem(
+            value: 'separate_islands',
+            height: 34,
+            child: Text('Separate Mesh Islands', style: itemStyle),
+          ),
+          const PopupMenuItem(
+            value: 'split_grid',
+            height: 34,
+            child: Text('Split Mesh by Grid...', style: itemStyle),
+          ),
+          const PopupMenuDivider(height: 8),
+        ],
+        PopupMenuItem(
+          value: 'duplicate',
+          enabled: !isMember,
+          height: 34,
+          child: const Text('Duplicate', style: itemStyle),
+        ),
+        PopupMenuItem(
+          value: 'delete',
+          enabled: !isMember,
+          height: 34,
+          child: const Text('Delete', style: itemStyle),
+        ),
+      ],
+    );
+
+    if (!context.mounted || action == null) return;
+
+    switch (action) {
+      case 'separate_islands':
+        await ctrl.separateMeshIslands(node.id);
+      case 'split_grid':
+        final cellSize = await promptSplitGridCellSize(context);
+        if (cellSize != null && cellSize > 0) {
+          await ctrl.splitMeshByGrid([node.id], cellSize: cellSize);
+        }
+      case 'duplicate':
+        await ctrl.duplicateSelection();
+      case 'delete':
+        await ctrl.deleteSelection();
+    }
   }
 }
 
