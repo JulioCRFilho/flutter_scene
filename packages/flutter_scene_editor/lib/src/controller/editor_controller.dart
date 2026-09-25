@@ -18,6 +18,7 @@
 /// realizer's own id tagging ([nodeFsceneId]).
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -181,6 +182,8 @@ class EditorController extends EditorControllerBase
         controller.displayDocument.nodes.containsKey(id);
     await controller._realizeAll();
     session.selection.addListener(controller._onSelectionChanged);
+    // The title marks unsaved work, so a dirtiness change is a rebuild.
+    session.addDirtyListener(controller.notifyListeners);
     // Restore the document's carried editor state. The selection applies
     // here; the shell reads [restoredEditorState] for the camera pose.
     final editorState = session.document.editor;
@@ -274,6 +277,7 @@ class EditorController extends EditorControllerBase
   void dispose() {
     _ticker?.stop();
     session.selection.removeListener(_onSelectionChanged);
+    session.removeDirtyListener(notifyListeners);
     fmatLibrary.dispose();
     lastError.dispose();
     previewEpoch.dispose();

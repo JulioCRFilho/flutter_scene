@@ -73,6 +73,7 @@ export 'src/property_value.dart'
         Matrix4Value,
         NodeRefValue,
         PropertyValue,
+        UnknownValue,
         QuaternionValue,
         ResourceRefValue,
         StringValue,
@@ -106,6 +107,7 @@ export 'src/json/fscene_json.dart'
     show
         decodeDocument,
         encodeDocument,
+        encodeNode,
         encodeResource,
         encodeSkySource,
         encodeStage,

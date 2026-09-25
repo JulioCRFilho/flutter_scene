@@ -29,6 +29,7 @@ import 'package:flutter_scene/src/material/physically_based_material.dart';
 import 'package:flutter_scene/src/material/preprocessed_material.dart';
 import 'package:flutter_scene/src/material/unlit_material.dart';
 import 'package:flutter_scene/src/texture/compressed_texture.dart';
+import 'package:flutter_scene/src/texture/encoded_image.dart';
 import 'package:flutter_scene/src/render/mip_sampling_probe.dart';
 import 'package:flutter_scene/src/texture/mipmap.dart';
 import 'package:flutter_scene/src/texture/mipmap_async.dart';
@@ -364,8 +365,11 @@ class ResourceRealizer {
       // Prefer a disk-loaded image (an editor-imported texture under
       // `imported/`); fall back to the asset bundle for in-bundle assets.
       final loaded = await textureLoader?.call(asset);
-      final image = loaded ?? await imageFromAsset(asset.key, bundle: bundle);
-      return _mippedTextureFromImage(image, content);
+      if (loaded != null) return _mippedTextureFromImage(loaded, content);
+      return _textureFromEncoded(
+        await bytesFromAsset(asset.key, bundle: bundle),
+        content,
+      );
     }
     final payload = document.payload(res.payload!);
     final bytes = _payloadBytes(res.payload!, 'image');
@@ -389,6 +393,17 @@ class ResourceRealizer {
         content,
       );
     }
+    return _textureFromEncoded(bytes, content);
+  }
+
+  // The backend decodes and mips the image itself where it can (the web);
+  // otherwise the platform codec decodes it here.
+  Future<gpu.Texture> _textureFromEncoded(
+    Uint8List bytes,
+    TextureContent content,
+  ) async {
+    final direct = await gpuTextureFromEncodedBytes(bytes, content: content);
+    if (direct != null) return direct;
     return _mippedTextureFromImage(await imageFromBytes(bytes), content);
   }
 
@@ -577,7 +592,11 @@ class ResourceRealizer {
               ? MorphedUnskinnedGeometry(morphData)
               : UnskinnedGeometry());
 
-    ByteData? indexBytes;
+    // Held as the Uint8List the payload already is: these bytes are byte
+    // backed, so an upload crosses them natively as bytes and would pay a
+    // per-element read as any wider element type (see
+    // InterleavedLayoutAdapter.indexUploadView for the packer's opposite case).
+    Uint8List? indexBytes;
     var indexType = gpu.IndexType.int16;
     final indexId = res.indices;
     if (indexId != null) {
@@ -609,12 +628,12 @@ class ResourceRealizer {
             u16[i + 2] = tmp;
           }
         }
-        indexBytes = ByteData.sublistView(migrated);
+        indexBytes = migrated;
       } else {
         // TODO(winding): Support legacy winding migration for triangleStrip
         // topology (requires vertex-order reversal, not index-triple swap).
         // TODO(winding): Support non-indexed geometry winding migration.
-        indexBytes = ByteData.sublistView(rawIndexBytes);
+        indexBytes = rawIndexBytes;
       }
     }
 
@@ -645,18 +664,18 @@ class ResourceRealizer {
         vertexBytes,
         vertexCount,
       );
+      final interleaved = InterleavedLayoutAdapter.packUnskinned(
+        positions: Float32List.sublistView(streams.position),
+        vertexCount: vertexCount,
+        normals: Float32List.sublistView(streams.normal),
+        texCoords: Float32List.sublistView(streams.texCoord),
+        texCoords1: Float32List.sublistView(streams.texCoord1),
+        colors: Float32List.sublistView(streams.color),
+        tangents: Float32List.sublistView(streams.tangent),
+      );
       geometry.uploadVertexData(
-        ByteData.sublistView(
-          InterleavedLayoutAdapter.packUnskinned(
-            positions: Float32List.sublistView(streams.position),
-            vertexCount: vertexCount,
-            normals: Float32List.sublistView(streams.normal),
-            texCoords: Float32List.sublistView(streams.texCoord),
-            texCoords1: Float32List.sublistView(streams.texCoord1),
-            colors: Float32List.sublistView(streams.color),
-            tangents: Float32List.sublistView(streams.tangent),
-          ),
-        ),
+        // Packed into floats just above, so uploaded as floats.
+        Float32List.sublistView(interleaved),
         vertexCount,
         indexBytes,
         indexType: indexType,
@@ -686,9 +705,11 @@ class ResourceRealizer {
                     ByteData.sublistView(vertexBytes),
                     vertexCount,
                   )
-          : vertexBytes;
+          : null;
       geometry.uploadVertexData(
-        ByteData.sublistView(upgraded),
+        // An upgrade repacks into floats; a pass-through stays the payload's
+        // own bytes. Either way the upload gets the store's element type.
+        upgraded == null ? vertexBytes : Float32List.sublistView(upgraded),
         vertexCount,
         indexBytes,
         indexType: indexType,
@@ -931,6 +952,7 @@ class ResourceRealizer {
       'baseColorTextureTransform',
     );
     m.doubleSided = readBool(p, 'doubleSided', m.doubleSided);
+    m.displayReferred = readBool(p, 'displayReferred', m.displayReferred);
     m.alphaMode = _alphaMode(readString(p, 'alphaMode', 'opaque'));
     return m;
   }

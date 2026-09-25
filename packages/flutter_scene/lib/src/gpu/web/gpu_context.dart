@@ -34,8 +34,7 @@ base class GpuContext {
     _gl.getExtension('OES_texture_float_linear');
     // Anisotropic filtering. MAX_TEXTURE_MAX_ANISOTROPY_EXT = 0x84FF.
     if (_gl.getExtension('EXT_texture_filter_anisotropic') != null) {
-      final Object? max = _gl.getParameter(0x84FF);
-      _maxSupportedAnisotropy = max is num ? max.toInt() : 1;
+      _maxSupportedAnisotropy = _integerParameter(0x84FF) ?? 1;
     }
   }
 
@@ -102,12 +101,28 @@ base class GpuContext {
   /// draw (a lazily built placeholder, say) would otherwise replace the
   /// texture the pass bound on the active unit, a hazard Impeller's
   /// per-draw binding model does not have.
-  late final int _setupTextureUnit = () {
-    final Object? max = _gl.getParameter(
-      web.WebGL2RenderingContext.MAX_COMBINED_TEXTURE_IMAGE_UNITS,
-    );
-    return (max is num ? max.toInt() : 32) - 1;
-  }();
+  late final int _setupTextureUnit =
+      (_integerParameter(
+            web.WebGL2RenderingContext.MAX_COMBINED_TEXTURE_IMAGE_UNITS,
+          ) ??
+          32) -
+      1;
+
+  /// The largest texture side the context allocates, or null when the query
+  /// yields no number.
+  late final int? _maxTextureSize = _integerParameter(
+    web.WebGL2RenderingContext.MAX_TEXTURE_SIZE,
+  );
+
+  /// An integer `getParameter` result, or null when it is not a number. Read
+  /// as a JS value: under dart2wasm the result is not a Dart `num`, so an
+  /// `is num` check silently takes the fallback.
+  int? _integerParameter(int pname) {
+    final JSAny? value = _gl.getParameter(pname);
+    return value.isA<JSNumber>() ? (value as JSNumber).toDartInt : null;
+  }
+
+  late final _MipGenerator _mipGenerator = _MipGenerator(this);
 
   /// Binds [texture] on the reserved setup unit for creation or upload work.
   void _bindTextureForSetup(int target, web.WebGLTexture? texture) {
@@ -122,6 +137,28 @@ base class GpuContext {
       );
     }
     return DeviceBuffer._initialize(this, storageMode, sizeInBytes);
+  }
+
+  /// Web-only. A host-visible buffer committed to ONE GL role: vertex
+  /// (`index: false`) or index (`index: true`) data. Skips the staging mirror
+  /// and the lazy first-bind upload a generic buffer needs; see
+  /// [DeviceBuffer._initializeTyped]. [createGeometryBuffers] is built from
+  /// it, and so can a caller that manages its own [BufferView]s.
+  ///
+  /// The GL store is hinted STATIC_DRAW, which suits geometry written once at
+  /// creation. A geometry uploaded repeatedly (CPU morph blending re-uploads
+  /// on every weight change) allocates fresh buffers per upload rather than
+  /// rewriting these, so each one is still written once.
+  // TODO(web-buffers): Reuse a geometry's buffers when it re-uploads at the
+  // same size, instead of allocating a new pair and dropping the old one.
+  DeviceBuffer createTypedDeviceBuffer(int sizeInBytes, {required bool index}) {
+    return DeviceBuffer._initializeTyped(
+      this,
+      sizeInBytes,
+      index
+          ? web.WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER
+          : web.WebGL2RenderingContext.ARRAY_BUFFER,
+    );
   }
 
   DeviceBuffer createDeviceBufferWithCopy(ByteData data) {
@@ -357,3 +394,33 @@ Future<ui.Image> presentTextureAsImage(
   texture,
   transferOwnership: transferOwnership,
 );
+
+/// Writes mesh data into a buffer from [createGeometryBuffers] (or an arena's).
+/// [source] keeps its element type so the web backend can hand it to GL as-is;
+/// see [DeviceBuffer.overwriteTypedData].
+bool writeGeometryData(
+  DeviceBuffer buffer,
+  TypedData source, {
+  required int destinationOffsetInBytes,
+}) => buffer.overwriteTypedData(
+  source,
+  destinationOffsetInBytes: destinationOffsetInBytes,
+);
+
+/// The buffers one mesh upload needs: [vertexBytes] of vertex streams and
+/// [indexBytes] of indices. On web they are two role-typed buffers, because
+/// WebGL2 cannot share one buffer between the two roles and sharing one
+/// [DeviceBuffer] costs a staging mirror and a second full upload.
+/// [indexBaseOffset] is where the indices start inside [index].
+({DeviceBuffer vertex, DeviceBuffer index, int indexBaseOffset})
+createGeometryBuffers(int vertexBytes, int indexBytes) {
+  final vertex = gpuContext.createTypedDeviceBuffer(vertexBytes, index: false);
+  return (
+    vertex: vertex,
+    // Non-indexed geometry never binds an index buffer; do not allocate one.
+    index: indexBytes == 0
+        ? vertex
+        : gpuContext.createTypedDeviceBuffer(indexBytes, index: true),
+    indexBaseOffset: 0,
+  );
+}

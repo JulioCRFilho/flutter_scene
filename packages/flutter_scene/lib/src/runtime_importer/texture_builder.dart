@@ -1,5 +1,3 @@
-import 'dart:ui' as ui;
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
 import 'package:flutter_scene/src/importer/gltf.dart';
@@ -9,7 +7,6 @@ import '../texture/basisu/basis_ktx2.dart';
 import '../texture/basisu/basis_ktx2_loader.dart';
 import '../texture/compressed_texture.dart';
 import '../texture/ktx2/ktx2.dart';
-import '../texture/mipmap.dart';
 import '../texture/texture2d.dart';
 import 'gltf_resources.dart';
 
@@ -74,6 +71,7 @@ Future<List<Texture2D>> buildTextures(
   Uint8List bufferData, {
   GltfResourceResolver? resolveUri,
   GltfWarningCallback? onWarning,
+  int? maxTextureSize,
 }) async {
   void warn(String message) {
     if (onWarning != null) {
@@ -124,7 +122,11 @@ Future<List<Texture2D>> buildTextures(
       continue;
     }
     try {
-      results[i] = await _decodeAndUpload(imageBytes, contents[i]);
+      results[i] = await Texture2D.fromEncodedBytes(
+        imageBytes,
+        content: contents[i],
+        maxSize: maxTextureSize,
+      );
     } catch (e, st) {
       warn('Failed to decode glTF image $imageIdx: $e\n$st');
     }
@@ -146,19 +148,6 @@ Future<List<Texture2D>> buildTextures(
     }
   }
   return [for (final result in results) result ?? _placeholder()];
-}
-
-Future<Texture2D> _decodeAndUpload(
-  Uint8List bytes,
-  TextureContent content,
-) async {
-  final codec = await ui.instantiateImageCodec(bytes);
-  final frame = await codec.getNextFrame();
-  try {
-    return await Texture2D.fromImage(frame.image, content: content);
-  } finally {
-    frame.image.dispose();
-  }
 }
 
 Texture2D _placeholder() {

@@ -1,5 +1,12 @@
 ## 0.24.0
 
+* Fixed unlit `.fmat` materials drawing nothing on Impeller Vulkan. Their shader carried an unread radiance block that collided with the vertex stage's frame block in the pipeline layout, which some drivers reject; the block is now compiled out where nothing reads it.
+* Display-referred surfaces. `Material.displayReferred` (settable on `UnlitMaterial`) marks a surface whose color is already final screen values, so it draws past the tone curve into its own layer and composites onto the resolved image with its colors unchanged. `WidgetComponent` turns it on for the material it owns, fixing captured widgets arriving dark and dark tones crushed (#382); pass `displayReferred: false` for a screen that should read as a lit object. The layer is still occluded by opaque geometry, but takes no exposure, grading, tone mapping, fog, bloom or depth of field, casts no shadow, and does not order against translucent geometry.
+* Web decodes glTF, `.fscene`, and asset textures in the browser and builds their mip chains on the GPU, so large images no longer render in pieces and no longer stall the main thread.
+* `Texture2D.fromEncodedBytes` uploads an encoded image. It, `Texture2D.fromAsset`, and the glTF loaders take a size cap that scales larger images down as they decode.
+* Web wasm builds now enable anisotropic filtering, which a mistyped limit query had silently disabled.
+* Web mesh uploads give vertex and index data a GL buffer each, written straight through, instead of one shared buffer mirrored in Dart and uploaded twice. Meshes outside a `GeometryBufferArena` upload about half the bytes, and far faster under wasm.
+* `Geometry.uploadVertexData` takes `TypedData` rather than `ByteData` for its vertices and indices, so an upload keeps the element type it was packed as. Subclasses overriding it must widen their parameters to match.
 * `OrthographicCamera` and `OrthographicProjection` add parallel projection, sized by `OrthographicSize` (full world extents with height, width, contain, cover, or stretch fitting, or a fixed `pixelsPerUnit`) plus `zoom`, `offset`, and a `near` that may be negative.
 * `CameraProjection.getProjectionMatrixForViewport` lets a projection size its volume from the view's logical size, which rendering and picking both resolve against.
 * Shadows, AO, SSR, TAA, depth of field, god rays, GI, planar reflections, froxel lighting, LOD, and custom-pass depth/normals all work under orthographic and custom projections.
@@ -7,11 +14,15 @@
 * `.fscene` cameras serialize orthographic projections, the editor draws their view volume, and `OrbitCameraController` dollies an orthographic camera by zoom.
 * Gaussian splats sort back to front and evaluate view-dependent color under orthographic cameras.
 * BREAKING: `Lighting` takes `projectionScaleX/Y`, `projectionOffsetX/Y`, and `orthographic` in place of `tanHalfFovX/Y`, which remain as deprecated getters.
+* The vertex stage writes the world normal and tangent varyings at unit length, so a model authored at a small scale no longer lights black on GPUs that flush its tiny normals to zero in mediump varyings.
 * Screen-size LOD applies to every perspective camera, not only `PerspectiveCamera`.
 * Update `flutter_scene-idioms` (v9) and `flutter_scene-looks` (v5) skills with orthographic cameras.
+* Apps ship each engine shader bundle once and only for their own platform; a shared pub cache used to ship every platform's bundles, twice with data assets enabled.
+* `dart run flutter_scene:init` lists a directory per platform in the app's pubspec so the app's own generated shaders ship only for their platform too; rerun it in an existing app.
 * `Scene.addTickListener` runs a `SceneTickListener` at the start of every tick and before every fixed step, ahead of all components, for per-frame sampling such as input.
 * `FlyCameraController.setMoveInput` drives movement from a gamepad, touch controls, or an input system, summing with the keys and keeping analog magnitude.
 * Cascaded shadows skip casters that cannot shadow anything the camera shades, cutting shadow-pass draws with no change to the rendered image.
+* Skinned vertex shaders normalize the four joint weights, so a mesh exported with weights summing to slightly under 1 no longer stretches toward the origin as it moves away from it.
 * `releaseTransientRenderTargets()` drops the render graph's pooled attachments (shadow atlas, scene color, depth, the post-process chain) and returns the bytes released; they reallocate on the next frame that needs them.
 * Pooled render targets are released automatically on platform memory pressure (`releaseRenderTargetsOnMemoryPressure` turns that off), and `takeMemoryReport()` reports them as a `render targets` category.
 * Surface debug views. `Scene.debug.view` shows a resolved material channel (base color, roughness, metallic, every physical field), a geometry attribute (normals, tangents, UV sets, vertex color, face orientation, UV checkers), an identity color per object or material, or a validation flag (NaN/Inf, albedo range, non-binary metallic, missing tangents, UV range) in place of the lit result, on every material including `.fmat` ones, at runtime in any build. `Scene.debug.split` compares a view against the lit image, `DebugView` carries a range, gain, and out-of-range policy, `Node.debugView` overrides or excludes a subtree, and `Scene.debug.overlays` adds a wireframe drawn through each mesh's own vertex path. `DebugViewRegistry` lists the views by id for tools; a `.fmat` shows any value through `material.debug` and the `custom` channel.
@@ -60,6 +71,11 @@
 * Fix vertex-attribute traffic on the web backend growing quadratically across same-pipeline draws.
 * On web, shader bundles and their generated JSON revalidate with the server on load, so a browser cache can no longer pair a previous build's bundle with new Dart code.
 * Spatial audio follows a `SceneView`'s camera (or `cameraBuilder`) when no scene camera or `AudioListener` is set, instead of a listener stuck at the origin.
+* Fix the mip-sampling probe reporting the base-mip clamp on hardware that samples mip chains correctly, about one cold run in three on a Mali-G57. It read its render target back without waiting for the draw, which the OpenGL ES backend runs on the raster thread, so an unrendered target answered with whatever its memory held. A false reading dropped every uploaded mip chain for the life of the process and moved image-based lighting to the radiance atlas, silently.
+* The split-sum environment BRDF ships precomputed as `assets/dfg.bin` instead of being integrated at every cold start, taking `Scene.initializeStaticResources()` from 274ms to under 20ms on a Galaxy A16. The table is a constant, so the asset is bit-identical to the integration; an app that trims it still gets a correct table, built off the render isolate and with a message saying what it costs.
+* The CPU mip build is roughly twice as fast for color and normal textures: the content switch moved out of the per-texel loop, the normal filter's taps are unrolled, and the sRGB decode reads a 256-entry table instead of calling `pow` three times per texel. A 2048-square color chain drops from 141ms to 55ms.
+* Radiance prefiltering fills one roughness band per frame instead of submitting the whole atlas as a single draw. That draw was ~850ms of GPU work on a Mali-G57, and because it lands inside a Flutter frame the display froze until the driver's buffer-queue timeout; a cold start that built two environments spent 1.7 seconds of 3.1 frozen. The texture is returned immediately and sharpens over the following frames, and `EnvironmentMap.radianceComplete` waits for the finished result.
+* The radiance prefilter takes its mirror band directly rather than integrating a delta lobe 256 times, and generates its samples from a rank-1 lattice instead of a float-emulated radical inverse whose loop cost more than the texture fetches it fed. Together about half the prefilter's GPU cost, with no change to the rendered result.
 
 ## 0.23.0
 

@@ -21,6 +21,12 @@ uniform PrefilterInfo {
   // equirect, so there is no atlas math and no discard). band_index must
   // be non-negative in this mode.
   float whole_target;
+  // 1.0 to compute every band at roughness 0 (the mirror), which the delta
+  // lobe answers in one fetch. A progressive fill seeds the whole atlas with
+  // this before pacing the real bands, so a frame that samples the atlas
+  // while it is still filling reads the environment rather than the clear
+  // color. Each paced band then overwrites its seed.
+  float force_mirror;
 }
 prefilter_info;
 
@@ -29,6 +35,8 @@ in vec2 v_uv;  // [0, 1]^2 over the whole atlas; v_uv.y = 0 at the top.
 out vec4 frag_color;
 
 #include <pbr.glsl>      // kPi, SRGBToLinear
+// Equirect helpers only; the radiance block would be declared unread.
+#define FLUTTER_SCENE_NO_ENGINE_RADIANCE
 #include <texture.glsl>  // kPrefilterBands, Spherical<->Equirectangular
 
 // Samples the source environment as linear radiance. An sRGB source is
@@ -51,23 +59,21 @@ vec3 SampleSourceRadiance(vec3 direction) {
 // sample set (see main) reads as fine noise rather than visible swirls.
 const int kPrefilterSamples = 256;
 
-// Van der Corput radical inverse in base 2, computed with float ops only
-// (no integer bit operations, which aren't reliably available in the GLSL
-// dialects Impeller targets). `i` is an integer-valued float in [0, n).
-float RadicalInverseVdC(float i) {
-  float result = 0.0;
-  float f = 0.5;
-  float x = i;
-  for (int k = 0; k < 20; k++) {
-    result += mod(x, 2.0) * f;
-    x = floor(x * 0.5);
-    f *= 0.5;
-  }
-  return result;
-}
+// The i'th point of a rank-1 lattice: stratified in x, and in y the
+// golden-ratio (Kronecker) sequence, whose discrepancy matches the Hammersley
+// set this replaces. Two multiplies instead of a 20-iteration float emulation
+// of a base-2 radical inverse, which the integer bit operations missing from
+// the GLSL dialects Impeller targets would otherwise need. That loop cost more
+// than the texture fetch it fed.
+//
+// highp is required, not decorative: the y term grows to ~158 by the last
+// sample, where fp16's 10-bit mantissa cannot resolve the fractional part at
+// all and every sample would collapse onto the same few directions.
+const highp float kGoldenRatioConjugate = 0.6180339887498949;
 
-vec2 Hammersley(int i, int n) {
-  return vec2(float(i) / float(n), RadicalInverseVdC(float(i)));
+vec2 LatticePoint(int i, int n) {
+  highp float kronecker = 0.5 + float(i) * kGoldenRatioConjugate;
+  return vec2(float(i) / float(n), fract(kronecker));
 }
 
 // Samples a half-vector from the GGX normal distribution around `n`.
@@ -102,7 +108,9 @@ void main() {
   vec3 n = normalize(EquirectangularToSpherical(vec2(v_uv.x, band_v)));
   // Standard "view == normal" prefiltering assumption.
   vec3 v = n;
-  float roughness = band_index / max(kPrefilterBands - 1.0, 1.0);
+  float roughness = prefilter_info.force_mirror > 0.5
+                        ? 0.0
+                        : band_index / max(kPrefilterBands - 1.0, 1.0);
 
   // Per-texel azimuthal rotation of the importance-sample set. The GGX
   // samples live in a tangent frame that rotates with n, so a fixed
@@ -120,12 +128,19 @@ void main() {
   // self-disables (every sample equals the center). Mirrors the cube prefilter.
   const vec3 kLuma = vec3(0.2126, 0.7152, 0.0722);
   vec3 center = SampleSourceRadiance(n);
+  // The mirror band is the source itself: at roughness 0 the GGX lobe is a
+  // delta, so every one of the samples below would read exactly the center.
+  // Taking it directly is the same answer for 1/256th of the work.
+  if (roughness <= 0.0) {
+    frag_color = vec4(center, 1.0);
+    return;
+  }
   float max_luma = max(dot(center, kLuma), 1.0) * 8.0;
 
   vec3 color = vec3(0.0);
   float total_weight = 0.0;
   for (int i = 0; i < kPrefilterSamples; i++) {
-    vec2 xi = Hammersley(i, kPrefilterSamples);
+    vec2 xi = LatticePoint(i, kPrefilterSamples);
     xi.x = fract(xi.x + jitter);
     vec3 h = ImportanceSampleGGX(xi, n, roughness);
     vec3 l = normalize(2.0 * dot(v, h) * h - v);

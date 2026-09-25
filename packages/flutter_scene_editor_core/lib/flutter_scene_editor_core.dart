@@ -49,10 +49,39 @@ export 'src/command.dart'
         CommandContext,
         CommandException,
         CommandEntry,
+        CommandKind,
         CommandRegistry,
         UiFieldDescriptor,
         mcpToolSchema,
+        paramJsonSchema,
         uiDescriptors;
+
+// Many commands as one undo step.
+export 'src/batch.dart' show CommandCall, BatchException, BatchComposer;
+
+// The read half of the protocol.
+export 'src/queries.dart'
+    show
+        QueryBlob,
+        QueryResult,
+        QueryContext,
+        QueryException,
+        QueryEntry,
+        QueryRegistry,
+        querySchema;
+export 'src/builtin_queries.dart'
+    show
+        builtinQueries,
+        registerBuiltinQueries,
+        propertyValueToJson,
+        resourceKindOf;
+
+// Events and per-client subscriptions.
+export 'src/events.dart'
+    show EditorEvent, EditorEventType, EventBus, EventSubscription;
+
+// The protocol's own version and capabilities.
+export 'src/protocol.dart' show EditorProtocol;
 
 // Parameter coercion helpers (for command authors).
 export 'src/params.dart'
@@ -60,9 +89,11 @@ export 'src/params.dart'
         requireString,
         optionalString,
         requireBool,
+        optionalBool,
         requireInt,
         optionalInt,
         requireDouble,
+        optionalDouble,
         requireVec3,
         optionalVec3,
         requireQuaternion,
@@ -73,11 +104,22 @@ export 'src/params.dart'
         requireResourceId,
         optionalResourceId,
         requireAssetRef,
+        requireBytes,
         optionalPropertyMap,
         optionalOverrides,
         coercePropertyValue;
 
 // The built-in command set.
+export 'src/app_commands.dart' show applicationCommands;
+
+export 'src/view_commands.dart'
+    show
+        clearSelection,
+        frameNodes,
+        selectNodes,
+        setViewportCamera,
+        viewCommands;
+
 export 'src/builtin_commands.dart'
     show
         builtinCommands,
@@ -96,5 +138,7 @@ export 'src/graft.dart' show graftDocumentRecords, wrapRootsUnderGroup;
 
 // Selection, queries, and the session that ties it all together.
 export 'src/selection.dart' show Selection;
+export 'src/editor_host.dart' show EditorHost;
+export 'src/view_host.dart' show ViewHost;
 export 'src/query.dart' show SceneQuery;
 export 'src/session.dart' show EditorSession;

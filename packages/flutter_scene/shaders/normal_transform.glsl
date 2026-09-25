@@ -36,3 +36,17 @@ mat3 WorldNormalMatrix(mat3 linear) {
   }
   return cofactor * sign(det);
 }
+
+//------------------------------------------------------------------------------
+/// [v] at unit length, or zero unchanged (a zero tangent means no tangent
+/// frame).
+///
+/// The normal and tangent varyings are mediump in the fragment stage, and
+/// WorldNormalMatrix scales with the square of the model scale, so a model
+/// under a 0.01 root left the vertex stage with a ~1e-4 normal that fp16
+/// flushes to zero on some GPUs (an Adreno 829 lit the mesh black). Unit
+/// vectors interpolate safely at any model scale.
+vec3 UnitOrZero(vec3 v) {
+  float len = length(v);
+  return len > 0.0 ? v / len : v;
+}

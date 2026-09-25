@@ -61,7 +61,7 @@ mixin EditorControllerClipboard on EditorControllerBase {
       'nodeIds': [for (final id in tops) id.toToken()],
     });
     final created = attachedIds(tx);
-    if (created.isNotEmpty) selection.set(created);
+    if (created.isNotEmpty) selectAfterEdit(created);
   }
 
   /// Pastes the clipboard subtrees under the primary selection (the root list
@@ -75,7 +75,7 @@ mixin EditorControllerClipboard on EditorControllerBase {
       'subtrees': _clipboard,
     });
     final created = attachedIds(tx);
-    if (created.isNotEmpty) selection.set(created);
+    if (created.isNotEmpty) selectAfterEdit(created);
   }
 
   /// Deletes the selection. Prefab-internal nodes are removed through their
@@ -189,7 +189,7 @@ mixin EditorControllerClipboard on EditorControllerBase {
       if (parent != null) 'parent': parent.toToken(),
     });
     final created = attachedIds(tx);
-    if (created.isNotEmpty) selection.set(created);
+    if (created.isNotEmpty) selectAfterEdit(created);
   }
 
   /// The node ids newly added to a container by [transaction] (the difference

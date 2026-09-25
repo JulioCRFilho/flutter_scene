@@ -13,6 +13,10 @@ library;
 import 'package:scene/scene.dart';
 import 'package:scene/schema.dart';
 
+import 'editor_host.dart';
+import 'selection.dart';
+import 'view_host.dart';
+
 import 'change.dart';
 
 /// The wire type of a command parameter, shared by the JSON schema and the UI.
@@ -65,6 +69,11 @@ enum ParamType {
   /// A list of free-form JSON objects (the entry shape is described in the
   /// parameter's description).
   objectList,
+
+  /// Raw bytes, base64-encoded on the wire. The only way to hand the engine
+  /// data it cannot describe in JSON, which is what mesh and image payloads
+  /// are.
+  bytes,
 }
 
 /// One declared parameter of a command.
@@ -105,7 +114,13 @@ class CommandContext {
   /// Creates a context over [document], optionally with a [componentSchema]
   /// lookup so component commands can coerce and clamp property values
   /// against their declared descriptors.
-  CommandContext(this.document, {this.componentSchema});
+  CommandContext(
+    this.document, {
+    this.componentSchema,
+    this.selection,
+    this.view,
+    this.host,
+  });
 
   /// The document being edited (read access plus [SceneDocument.newId]).
   final SceneDocument document;
@@ -113,6 +128,41 @@ class CommandContext {
   /// Resolves a component type to its schema, or null when unknown (the
   /// host decides what is registered; commands fall back to shape-guessing).
   final ComponentSchema? Function(String type)? componentSchema;
+
+  /// The session's selection, present whenever a session runs the command.
+  final Selection? selection;
+
+  /// The viewport, present only when the host supplied one.
+  final ViewHost? view;
+
+  /// The application around the document, present only in a hosted editor.
+  final EditorHost? host;
+}
+
+/// What a command touches, which decides how a host runs it and whether it
+/// reaches the undo history.
+enum CommandKind {
+  /// Edits the document. Returns the transaction the host commits.
+  document,
+
+  /// Changes the selection. Carries no records, but is a history step of its
+  /// own, so undo walks back through selections the way it does through
+  /// edits.
+  selection,
+
+  /// Moves the viewport. Never a history step, though it does mark the
+  /// document dirty, since the camera is saved with it.
+  view,
+
+  /// Changes the editor around the document (the active tool, panels, debug
+  /// visualizations). Never a history step, and never saved, so it leaves a
+  /// clean document clean.
+  ui,
+
+  /// Drives the application around the document: opening and saving, the
+  /// project, the running app, the editor's own panels. Asynchronous, and
+  /// never a history step.
+  application,
 }
 
 /// Thrown when a command receives invalid or missing parameters.
@@ -136,8 +186,32 @@ class CommandEntry {
     required this.paramSchema,
     required this.execute,
     this.category = '',
+    this.kind = CommandKind.document,
     this.applicable = _always,
-  });
+  }) : perform = null;
+
+  /// Declares an asynchronous command that acts on the host rather than the
+  /// document. Run it with `EditorSession.invoke`; `run` refuses it.
+  CommandEntry.application({
+    required this.name,
+    required this.doc,
+    required this.paramSchema,
+    required Future<void> Function(CommandContext, Map<String, Object?>)
+    this.perform,
+    this.category = '',
+    this.applicable = _always,
+  }) : kind = CommandKind.application,
+       execute = _refuseSync;
+
+  static Transaction _refuseSync(
+    CommandContext context,
+    Map<String, Object?> params,
+  ) => throw const CommandException(
+    'This command is asynchronous; call invoke instead of run',
+  );
+
+  /// The asynchronous body, set only for [CommandKind.application].
+  final Future<void> Function(CommandContext, Map<String, Object?>)? perform;
 
   /// The stable command name (for example `setNodeTransform`).
   final String name;
@@ -147,6 +221,9 @@ class CommandEntry {
 
   /// A grouping label for menus and tool browsing (for example `Node`).
   final String category;
+
+  /// What this command touches.
+  final CommandKind kind;
 
   /// The parameter declarations, the single source of truth from which the
   /// MCP schema and the UI descriptors are derived.
@@ -189,22 +266,26 @@ class CommandRegistry {
 /// Returns an MCP-tool definition (JSON Schema draft-07 input schema) for
 /// [entry], ready to `jsonEncode`. Derived entirely from [entry]'s
 /// declaration.
-Map<String, Object> mcpToolSchema(CommandEntry entry) {
+Map<String, Object> mcpToolSchema(CommandEntry entry) => {
+  'name': entry.name,
+  'description': entry.doc,
+  'inputSchema': paramJsonSchema(entry.paramSchema),
+};
+
+/// Returns the JSON Schema (draft-07) object for [params], the argument
+/// schema a command or a query declares.
+Map<String, Object> paramJsonSchema(List<ParamSpec> params) {
   final properties = <String, Object>{};
   final required = <String>[];
-  for (final param in entry.paramSchema) {
+  for (final param in params) {
     properties[param.name] = _paramJsonSchema(param);
     if (param.required) required.add(param.name);
   }
   return {
-    'name': entry.name,
-    'description': entry.doc,
-    'inputSchema': {
-      'type': 'object',
-      'properties': properties,
-      if (required.isNotEmpty) 'required': required,
-      'additionalProperties': false,
-    },
+    'type': 'object',
+    'properties': properties,
+    if (required.isNotEmpty) 'required': required,
+    'additionalProperties': false,
   };
 }
 
@@ -304,6 +385,12 @@ Map<String, Object> _paramJsonSchema(ParamSpec param) {
         'type': 'array',
         'description': param.description,
         'items': {'type': 'object', 'additionalProperties': true},
+      };
+    case ParamType.bytes:
+      return {
+        'type': 'string',
+        'description': '${param.description} (base64-encoded bytes)'.trim(),
+        'contentEncoding': 'base64',
       };
   }
 }

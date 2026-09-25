@@ -47,7 +47,9 @@ base class EnvironmentMap {
     List<Vector3> sh, {
     gpu.Texture? rebakeSource,
     bool rebakeSourceIsLinear = false,
+    RadiancePrefilterFill? radianceFill,
   }) : assert(sh.length == kDiffuseShCoefficientCount),
+       _radianceFill = radianceFill,
        _diffuseSphericalHarmonics = sh,
        _diffuseShTexture = _shTextureFromList(sh) {
     // An image environment's full-resolution source equirect, retained so the
@@ -128,6 +130,22 @@ base class EnvironmentMap {
   /// them on the atlas. Note the same clamp applies to every other mipmapped
   /// texture in the app, which no layout choice can work around.
   static bool useMipRadianceLayout = true;
+
+  /// Builds radiance in one submission instead of pacing it across frames.
+  ///
+  /// New environments normally seed their radiance and then refine it a
+  /// roughness band per frame, because submitting the whole prefilter at once
+  /// hands the driver more GPU work than a display pipeline can absorb inside
+  /// a frame (see [prefilterEquirectRadianceProgressive]). The cost is that an
+  /// environment is an approximation for its first few frames.
+  ///
+  /// Turn this on where the next frame has to show the converged environment
+  /// and a stall does not matter: an offline bake, a golden or smoke capture,
+  /// a still being rendered for export. Affects only environments built
+  /// afterwards.
+  ///
+  /// {@category Lighting and environment}
+  static bool synchronousRadiancePrefilter = false;
 
   /// Base-mip face size of the prefiltered radiance cubemap new environments
   /// build (the convolved reflection/ambient cube).
@@ -366,14 +384,15 @@ base class EnvironmentMap {
     List<Vector3>? diffuseSphericalHarmonics,
   }) async {
     final radianceTexture = await gpuTextureFromImage(radianceImage);
-    final prefilteredRadiance = _buildRadiance(radianceTexture);
+    final radianceFill = _buildRadiance(radianceTexture);
     final sh =
         diffuseSphericalHarmonics ??
         await computeDiffuseSphericalHarmonics(radianceImage);
     return EnvironmentMap._(
-      prefilteredRadiance,
+      radianceFill.texture,
       sh,
       rebakeSource: radianceTexture,
+      radianceFill: radianceFill,
     );
   }
 
@@ -423,18 +442,16 @@ base class EnvironmentMap {
       width,
       height,
     );
-    final prefilteredRadiance = _buildRadiance(
-      radianceTexture,
-      sourceIsLinear: true,
-    );
+    final radianceFill = _buildRadiance(radianceTexture, sourceIsLinear: true);
     final sh =
         diffuseSphericalHarmonics ??
         _projectLinearEquirectToSphericalHarmonics(linearPixels, width, height);
     return EnvironmentMap._(
-      prefilteredRadiance,
+      radianceFill.texture,
       sh,
       rebakeSource: radianceTexture,
       rebakeSourceIsLinear: true,
+      radianceFill: radianceFill,
     );
   }
 
@@ -646,14 +663,16 @@ base class EnvironmentMap {
       _studioEnvWidth,
       _studioEnvHeight,
     )..overwrite(ByteData.sublistView(pixels));
+    final radianceFill = _buildRadiance(radianceTexture);
     return EnvironmentMap._(
-      _buildRadiance(radianceTexture),
+      radianceFill.texture,
       _projectEquirectToSphericalHarmonics(
         pixels,
         _studioEnvWidth,
         _studioEnvHeight,
       ),
       rebakeSource: radianceTexture,
+      radianceFill: radianceFill,
     );
   }
 
@@ -911,6 +930,28 @@ base class EnvironmentMap {
   gpu.Texture? _backgroundTexture;
   bool _backgroundIsLinear = false;
 
+  // The in-flight progressive radiance prefilter, or null for an environment
+  // whose radiance arrived complete (a pre-baked cube, a GPU-supplied
+  // texture). Retained so a re-bake can cancel it and so [radianceComplete]
+  // can report when the bands have landed.
+  RadiancePrefilterFill? _radianceFill;
+
+  /// Completes once every roughness band of [prefilteredRadiance] has been
+  /// submitted.
+  ///
+  /// An environment is usable as soon as it is constructed, but its radiance
+  /// is prefiltered a band at a time over the following frames so one
+  /// oversized draw cannot stall the display (see
+  /// [prefilterEquirectRadianceProgressive]). Until this completes, specular
+  /// reflections read the bands that have landed and sharpen as the rest
+  /// arrive. Await it before reading the radiance back or capturing a frame
+  /// that must show the finished environment.
+  ///
+  /// Already complete for an environment built from pre-baked radiance.
+  /// {@category Lighting and environment}
+  Future<void> get radianceComplete =>
+      _radianceFill?.done ?? Future<void>.value();
+
   // The equirect source this environment was prefiltered from, retained only
   // while it awaits a warm-context re-bake (web only); dropped once re-baked
   // or when built warm, so steady-state memory is unchanged.
@@ -947,10 +988,13 @@ base class EnvironmentMap {
       return;
     }
     _rebakeSource = null;
-    _prefilteredRadianceTexture = _buildRadiance(
-      source,
-      sourceIsLinear: _rebakeSourceIsLinear,
-    );
+    // The cold texture is about to be dropped, so stop filling it. Without
+    // this its remaining bands keep costing GPU time for an image nothing
+    // samples any more.
+    _radianceFill?.cancel();
+    final fill = _buildRadiance(source, sourceIsLinear: _rebakeSourceIsLinear);
+    _radianceFill = fill;
+    _prefilteredRadianceTexture = fill.texture;
   }
 
   /// Marks the GL context warm and re-bakes the radiance of every environment
@@ -1008,20 +1052,39 @@ base class EnvironmentMap {
   /// Prefilters [source] into the radiance representation this backend uses:
   /// a roughness-mip cubemap where supported (no pole distortion), the legacy
   /// equirect band atlas otherwise.
-  static gpu.Texture _buildRadiance(
+  ///
+  /// Returns as soon as the texture exists; its roughness bands fill in over
+  /// the next few frames, because submitting the whole prefilter as one draw
+  /// freezes the display for most of a second on an Android GLES device (see
+  /// [prefilterEquirectRadianceProgressive]). [radianceComplete] waits for the
+  /// rest.
+  static RadiancePrefilterFill _buildRadiance(
     gpu.Texture source, {
     bool sourceIsLinear = false,
-  }) => effectiveMipRadianceLayout
-      ? prefilterEquirectRadianceToCube(
-          source,
-          sourceIsLinear: sourceIsLinear,
-          size: radianceCubeSize,
-        )
-      : prefilterEquirectRadiance(
-          source,
-          sourceIsLinear: sourceIsLinear,
-          mipLayout: false,
-        );
+  }) {
+    if (synchronousRadiancePrefilter) {
+      return RadiancePrefilterFill.completed(
+        effectiveMipRadianceLayout
+            ? prefilterEquirectRadianceToCube(
+                source,
+                sourceIsLinear: sourceIsLinear,
+                size: radianceCubeSize,
+              )
+            : prefilterEquirectRadiance(source, sourceIsLinear: sourceIsLinear),
+      );
+    }
+    return effectiveMipRadianceLayout
+        ? prefilterEquirectRadianceToCubeProgressive(
+            source,
+            sourceIsLinear: sourceIsLinear,
+            size: radianceCubeSize,
+          )
+        : prefilterEquirectRadianceProgressive(
+            source,
+            sourceIsLinear: sourceIsLinear,
+            mipLayout: false,
+          );
+  }
 
   /// The [kDiffuseShCoefficientCount] RGB L2 spherical-harmonic
   /// coefficients describing the diffuse (Lambertian) irradiance.

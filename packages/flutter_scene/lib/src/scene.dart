@@ -73,6 +73,7 @@ import 'render/render_quality.dart';
 import 'scene_encoder.dart' show maxSceneColorCaptureBatches;
 import 'render/ssr_pass.dart';
 import 'screen_space_reflections.dart';
+import 'render/display_referred_pass.dart';
 import 'render/selection_outline_pass.dart';
 import 'depth_of_field.dart';
 import 'render/dof_pass.dart';
@@ -2515,6 +2516,9 @@ base class Scene implements SceneGraph {
     }
     final staticShadowSignature = _cachedStaticShadowSignature;
     final hasStaticShadowCasters = _cachedHasStaticShadowCasters;
+    // A display-referred surface pays for an extra layer and forces the
+    // scene depth to be stored, so the frame checks for one up front.
+    final displayReferredActive = sceneHasDisplayReferred(renderScene);
     final captureOpaqueColor =
         materialInputs.contains(RenderInput.opaqueSceneColor) ||
         materialInputs.contains(RenderInput.filteredSceneColor);
@@ -2935,6 +2939,15 @@ base class Scene implements SceneGraph {
         layerMask: view.layerMask,
         fog: fog,
         captureOpaqueColor: captureOpaqueColor,
+        displayReferredLayer: displayReferredActive,
+        displayReferredFormat: outputColor.format,
+        // TAA resolves the scene color only, and the layer composites after
+        // that, so it draws unjittered or it would shake by the jitter every
+        // frame. Its depth test still runs against the jittered scene depth,
+        // which costs sub-pixel accuracy at the occlusion edge.
+        displayReferredCameraTransform: enableTaa
+            ? camera.getViewTransform(pixelSize)
+            : null,
         maxCaptureBatches: effectiveSceneColorCaptureBatches,
         // Depth binding needs the prepass, which needs a valid projection.
         bindSceneDepth: bindSceneDepth && projectionValid,
@@ -3210,6 +3223,15 @@ base class Scene implements SceneGraph {
       );
     }
 
+    // No MSAA this frame, so the display-referred layer is single-sampled and
+    // the display-chain anti-aliasing is the only thing that can smooth its
+    // silhouette; composite it before that rather than after.
+    if (displayReferredActive && !enableMsaa) {
+      displaySteps.add(
+        (output) => DisplayReferredCompositePass(output: output),
+      );
+    }
+
     // FXAA/SMAA run after the resolve so custom after-tone-mapping effects
     // receive the anti-aliased image. The resolve applies film grain and
     // vignette first, so heavy grain is softened slightly here.
@@ -3237,6 +3259,16 @@ base class Scene implements SceneGraph {
           dimensions: pixelSize,
           time: postTime,
         ),
+      );
+    }
+
+    // Under MSAA the layer's silhouette is already multisampled, so the
+    // composite runs here, after anti-aliasing, and crisp UI is never
+    // resampled. Without MSAA it composites ahead of FXAA/SMAA instead (see
+    // above), since nothing else would smooth that silhouette.
+    if (displayReferredActive && enableMsaa) {
+      displaySteps.add(
+        (output) => DisplayReferredCompositePass(output: output),
       );
     }
 

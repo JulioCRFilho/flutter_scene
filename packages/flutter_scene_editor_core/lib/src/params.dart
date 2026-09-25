@@ -7,7 +7,9 @@
 /// the document.
 library;
 
+import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:scene/scene.dart';
 import 'package:scene/schema.dart';
@@ -47,6 +49,14 @@ bool requireBool(Map<String, Object?> params, String key) {
   return v;
 }
 
+/// Reads an optional boolean [key], or null when absent.
+bool? optionalBool(Map<String, Object?> params, String key) {
+  final v = _get(params, key);
+  if (v == null) return null;
+  if (v is! bool) throw CommandException('Param $key must be a boolean');
+  return v;
+}
+
 /// Reads a required integer [key].
 int requireInt(Map<String, Object?> params, String key) {
   final v = _get(params, key);
@@ -67,6 +77,14 @@ int? optionalInt(Map<String, Object?> params, String key) {
 double requireDouble(Map<String, Object?> params, String key) {
   final v = _get(params, key);
   if (v == null) _missing(key);
+  if (v is! num) throw CommandException('Param $key must be a number');
+  return v.toDouble();
+}
+
+/// Reads an optional number [key], or null when absent.
+double? optionalDouble(Map<String, Object?> params, String key) {
+  final v = _get(params, key);
+  if (v == null) return null;
   if (v is! num) throw CommandException('Param $key must be a number');
   return v.toDouble();
 }
@@ -180,6 +198,17 @@ LocalId? optionalResourceId(Map<String, Object?> params, String key) =>
 /// Reads a required asset path key [key] as an [AssetRef].
 AssetRef requireAssetRef(Map<String, Object?> params, String key) =>
     AssetRef(requireString(params, key));
+
+/// Reads required bytes at [key], base64-encoded (the only way JSON carries
+/// them). Throws [CommandException] when absent or not decodable.
+Uint8List requireBytes(Map<String, Object?> params, String key) {
+  final value = requireString(params, key);
+  try {
+    return base64Decode(value);
+  } on FormatException {
+    throw CommandException('Param "$key" is not valid base64');
+  }
+}
 
 /// Reads an optional property bag [key] (a JSON object of typed values),
 /// coercing each entry through [coercePropertyValue]. Returns an empty map

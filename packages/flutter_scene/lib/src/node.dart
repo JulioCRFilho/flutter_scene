@@ -1148,6 +1148,10 @@ base class Node implements SceneGraph {
   /// unrecognized extension, an image that fell back to a placeholder);
   /// without it they print instead.
   ///
+  /// [maxTextureSize], when given, caps the longest side of every texture. A
+  /// larger image is scaled down as it decodes, keeping its aspect ratio, so
+  /// its full-size pixels are never held.
+  ///
   /// Example:
   /// ```dart
   /// final bytes = await rootBundle.load('assets/dash.glb');
@@ -1156,14 +1160,20 @@ base class Node implements SceneGraph {
   static Future<Node> fromGlbBytes(
     Uint8List bytes, {
     GltfWarningCallback? onWarning,
+    int? maxTextureSize,
   }) {
-    return importGlb(bytes, onWarning: onWarning);
+    return importGlb(
+      bytes,
+      onWarning: onWarning,
+      maxTextureSize: maxTextureSize,
+    );
   }
 
   /// Convenience wrapper for [fromGlbBytes] that loads from the asset bundle.
   static Future<Node> fromGlbAsset(
     String assetPath, {
     GltfWarningCallback? onWarning,
+    int? maxTextureSize,
   }) async {
     final byteData = await rootBundle.load(assetPath);
     return importGlb(
@@ -1172,6 +1182,7 @@ base class Node implements SceneGraph {
         byteData.lengthInBytes,
       ),
       onWarning: onWarning,
+      maxTextureSize: maxTextureSize,
     );
   }
 
@@ -1201,8 +1212,14 @@ base class Node implements SceneGraph {
     Uint8List gltfJson, {
     required GltfResourceResolver resolveUri,
     GltfWarningCallback? onWarning,
+    int? maxTextureSize,
   }) {
-    return importGltf(gltfJson, resolveUri: resolveUri, onWarning: onWarning);
+    return importGltf(
+      gltfJson,
+      resolveUri: resolveUri,
+      onWarning: onWarning,
+      maxTextureSize: maxTextureSize,
+    );
   }
 
   /// This list allows the node to act as a parent in the scene graph hierarchy. Transformations

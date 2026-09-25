@@ -30,6 +30,11 @@ legal inputs clamp to `kMediumpFloatMax` (the GGX lobe of a mirror-smooth
 surface) or run in highp (the sheen lambda's exponentials, the thin-film
 phase).
 
+The world normal and tangent varyings stay mediump; the vertex stage writes
+them at unit length instead (`UnitOrZero` in `normal_transform.glsl`), since
+`WorldNormalMatrix` scales with the square of the model scale and a small
+model's ~1e-4 normal read back as zero on an Adreno 829.
+
 A material body in a `.fmat` inherits the mediump default like any engine
 source; declare `highp` on positions or coordinates it computes itself, or
 open the body with `precision highp float;` after its includes to run all of

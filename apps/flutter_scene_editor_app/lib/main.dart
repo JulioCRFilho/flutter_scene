@@ -16,9 +16,13 @@ import 'package:flutter/services.dart';
 import 'package:flutter/src/foundation/_features.dart' show isWindowingEnabled;
 import 'package:flutter/src/widgets/_window.dart';
 import 'package:flutter_scene_editor/flutter_scene_editor.dart';
+import 'package:flutter_scene_editor_core/flutter_scene_editor_core.dart'
+    show CommandException, EditorHost, EventBus, ViewHost;
 import 'package:flutter_scene_codegen/flutter_scene_codegen.dart';
 import 'package:scene/schema.dart';
-import 'package:scene/scene.dart' show EditorCameraSpec, EditorStateSpec;
+import 'package:scene/scene.dart'
+    show EditorCameraSpec, EditorStateSpec, LocalId;
+import 'package:vector_math/vector_math.dart' show Aabb3;
 import 'package:flutter_scene_mcp/flutter_scene_mcp.dart' show ToolError;
 import 'package:flutter_scene_mcp/socket_host.dart';
 
@@ -176,6 +180,7 @@ class _EditorHomeState extends State<_EditorHome> {
   // Remote control on the primary viewport's camera, for the MCP camera
   // tools (agents composing their own screenshots).
   final _cameraHandle = ViewportCameraHandle();
+  final _uiHandle = EditorUiHandle();
   ServerSocket? _mcpServer;
 
   late final EditorSettingsStore _settingsStore;
@@ -251,7 +256,19 @@ class _EditorHomeState extends State<_EditorHome> {
     return fmatToolchainForInstallation(selected);
   }
 
+  /// One event bus for the app, handed to each session as it comes up. One
+  /// delivery per frame, so a drag is one selection event rather than one per
+  /// pointer move.
+  final EventBus _events = EventBus()
+    ..flushScheduler = ((flush) =>
+        WidgetsBinding.instance.addPostFrameCallback((_) => flush()));
+
   void _configureController(EditorController controller) {
+    controller.session.viewHost = _EditorViewHost(this);
+    controller.session.host = _EditorHostImpl(this);
+    // The same bus across every document, so a client's subscription survives
+    // an open instead of dying with the session it was made against.
+    controller.session.events = _events;
     controller.fmatLibrary.toolchainResolver = _resolveToolchain;
     // Saves carry the viewport camera and selection in the document; a
     // restored pose applies now (buffered until a viewport attaches).
@@ -272,7 +289,7 @@ class _EditorHomeState extends State<_EditorHome> {
     };
     final restoredCamera = controller.restoredEditorState?.camera;
     if (restoredCamera != null) {
-      _cameraHandle.setPose(
+      _cameraHandle.restorePose(
         azimuth: restoredCamera.azimuth,
         elevation: restoredCamera.elevation,
         radius: restoredCamera.radius,
@@ -784,13 +801,91 @@ class _EditorHomeState extends State<_EditorHome> {
   /// The scene was written to disk; refresh the running session when the
   /// per-project toggle is on. A debug session patches scenes in place over
   /// the VM service; anything else falls back to a hot restart.
-  ///
+  Future<void> _hostNewDocument() async {
+    final controller = await EditorController.empty();
+    if (!mounted) {
+      controller.dispose();
+      return;
+    }
+    _replaceController(controller);
+  }
+
+  Future<void> _hostOpenDocument(String path) async {
+    final EditorController controller;
+    try {
+      controller = await openFscene(path);
+    } on IOException catch (e) {
+      throw FormatException('Could not open "$path", $e');
+    }
+    if (!mounted) {
+      controller.dispose();
+      return;
+    }
+    _replaceController(controller, path: path);
+  }
+
+  Future<void> _hostSaveDocument({String? path}) async {
+    final controller = _requireController;
+    final resolved = path ?? _scenePath;
+    if (resolved == null) {
+      throw const FormatException(
+        'The document has never been saved; pass a "path"',
+      );
+    }
+    await saveFscene(controller, resolved);
+    controller.setBaseDirectory(File(resolved).parent.path);
+    if (mounted) _setScenePath(resolved);
+    _onSceneSaved(resolved);
+  }
+
+  Future<void> _hostOpenProject(String path) async {
+    final FProject project;
+    if (FileSystemEntity.isDirectorySync(path)) {
+      final existing = Directory(path)
+          .listSync()
+          .whereType<File>()
+          .where((file) => file.path.endsWith('.fproject'))
+          .toList();
+      project = existing.isNotEmpty
+          ? FProject.load(existing.first.path)
+          : FProject.createDefault(path);
+    } else {
+      project = FProject.load(path);
+    }
+    _setProject(project);
+    // Resume the project's scene without holding up the caller (a large
+    // scene loads for a while).
+    unawaited(_openProjectScene(project));
+  }
+
+  Future<void> _hostSelectBuildConfiguration(String id) async {
+    final project = _project;
+    if (project == null) {
+      throw const FormatException('No project is open');
+    }
+    if (project.configurationById(id) == null) {
+      throw FormatException('No build configuration "$id"');
+    }
+    setState(() => _settings.selectedBuildConfigurations[project.path] = id);
+    _persistSettings();
+  }
+
+  Future<void> _hostSelectDevice(String id) async {
+    final project = _project;
+    if (project == null) {
+      throw const FormatException('No project is open');
+    }
+    setState(() => _settings.selectedDevices[project.path] = id);
+    _persistSettings();
+  }
+
   /// Also records the freshly written document as the saved baseline: any
   /// later close prompt compares the live session against it, and a document
   /// saved through this app (File menu, MCP, or the close dialog) is never
   /// flagged as having unsaved changes.
   void _onSceneSaved(String path) {
     _savedDocument = _controller?.session.toFscene();
+    _controller?.session.announceSaved(path: path);
     if (!_restartOnSceneSave) return;
     if (_session.state != AppSessionState.running) return;
     unawaited(() async {
@@ -1053,6 +1148,7 @@ class _EditorHomeState extends State<_EditorHome> {
     // A freshly opened (or brand-new) document is by definition saved;
     // subsequent edits are what mark it modified.
     _savedDocument = controller.session.toFscene();
+    controller.session.announceOpened(path: path);
     old?.dispose();
   }
 
@@ -1309,6 +1405,11 @@ class _EditorHomeState extends State<_EditorHome> {
           },
           commandRunner: (command, params) =>
               _requireController.run(command, params),
+          batchRunner: (calls, name, bindings) => _requireController.runAll(
+            calls,
+            name: name ?? 'Batch edit',
+            bindings: bindings,
+          ),
           undoRunner: () async {
             final controller = _requireController;
             final can = controller.history.canUndo;
@@ -1358,76 +1459,19 @@ class _EditorHomeState extends State<_EditorHome> {
             path,
             environmentId: environmentId,
           ),
-          newDocument: () async {
-            final controller = await EditorController.empty();
-            if (!mounted) {
-              controller.dispose();
-              return;
-            }
-            _replaceController(controller);
-          },
-          openDocument: (path) async {
-            final EditorController controller;
-            try {
-              controller = await openFscene(path);
-            } on IOException catch (e) {
-              throw FormatException('Could not open "$path", $e');
-            }
-            if (!mounted) {
-              controller.dispose();
-              return;
-            }
-            _replaceController(controller, path: path);
-          },
+          newDocument: _hostNewDocument,
+          openDocument: _hostOpenDocument,
           saveDocument: ({path}) async {
-            final controller = _requireController;
-            final resolved = path ?? _scenePath;
-            if (resolved == null) {
-              throw const FormatException(
-                'The document has never been saved; pass a "path"',
-              );
-            }
-            await saveFscene(controller, resolved);
-            controller.setBaseDirectory(File(resolved).parent.path);
-            if (mounted) _setScenePath(resolved);
-            _onSceneSaved(resolved);
-            return resolved;
+            await _hostSaveDocument(path: path);
+            return _scenePath!;
           },
           openProject: (path) async {
-            final FProject project;
-            if (FileSystemEntity.isDirectorySync(path)) {
-              final existing = Directory(path)
-                  .listSync()
-                  .whereType<File>()
-                  .where((file) => file.path.endsWith('.fproject'))
-                  .toList();
-              project = existing.isNotEmpty
-                  ? FProject.load(existing.first.path)
-                  : FProject.createDefault(path);
-            } else {
-              project = FProject.load(path);
-            }
-            _setProject(project);
-            // Resume the project's scene without holding up the response (a
-            // large scene loads for a while).
-            unawaited(_openProjectScene(project));
+            await _hostOpenProject(path);
             return _projectInfo()!;
           },
           closeProject: () async => _closeProject(),
           projectInfo: _projectInfo,
-          selectBuildConfiguration: (id) async {
-            final project = _project;
-            if (project == null) {
-              throw const FormatException('No project is open');
-            }
-            if (project.configurationById(id) == null) {
-              throw FormatException('No build configuration "$id"');
-            }
-            setState(
-              () => _settings.selectedBuildConfigurations[project.path] = id,
-            );
-            _persistSettings();
-          },
+          selectBuildConfiguration: _hostSelectBuildConfiguration,
           buildProject: _startBuild,
           runProject: _startPlaySession,
           stopProject: () => _session.stop(),
@@ -1475,14 +1519,7 @@ class _EditorHomeState extends State<_EditorHome> {
               ],
             };
           },
-          selectDevice: (id) async {
-            final project = _project;
-            if (project == null) {
-              throw const FormatException('No project is open');
-            }
-            setState(() => _settings.selectedDevices[project.path] = id);
-            _persistSettings();
-          },
+          selectDevice: _hostSelectDevice,
           readConsole: (tail) => {
             'building': _runner.building,
             'running': _session.active,
@@ -1566,6 +1603,7 @@ class _EditorHomeState extends State<_EditorHome> {
         controller: ctrl,
         viewportRepaintBoundaryKey: _viewportKey,
         viewportCameraHandle: _cameraHandle,
+        uiHandle: _uiHandle,
         gizmoPreferences: _gizmoPreferences,
         currentPath: _scenePath,
         onDocumentPathChanged: _setScenePath,
@@ -1973,5 +2011,159 @@ class _RecentSceneTile extends StatelessWidget {
       ),
       onTap: onOpen,
     );
+  }
+}
+
+/// Lets application commands drive the editor the same way its menus do, so
+/// a script, an agent, and a menu item take one path.
+class _EditorHostImpl implements EditorHost {
+  _EditorHostImpl(this._home);
+
+  final _EditorHomeState _home;
+
+  bool get _hasProject => _home._project != null;
+
+  bool get _running => _home._session.active;
+
+  @override
+  bool supports(String command) => switch (command) {
+    'closeProject' ||
+    'selectBuildConfiguration' ||
+    'selectDevice' ||
+    'buildProject' ||
+    'runProject' => _hasProject,
+    'stopProject' || 'hotReload' || 'hotRestart' || 'reloadScene' => _running,
+    'setToolMode' => _home._uiHandle.hasTool,
+    'showPanel' || 'focusPanel' => _home._uiHandle.hasPanels,
+    'setViewportDebugMode' => viewportDebugModes.isNotEmpty,
+    _ => true,
+  };
+
+  @override
+  Future<void> newDocument() => _home._hostNewDocument();
+
+  @override
+  Future<void> openDocument(String path) => _home._hostOpenDocument(path);
+
+  @override
+  Future<void> saveDocument({String? path}) =>
+      _home._hostSaveDocument(path: path);
+
+  @override
+  Future<void> openProject(String path) => _home._hostOpenProject(path);
+
+  @override
+  Future<void> closeProject() async => _home._closeProject();
+
+  @override
+  Future<void> selectBuildConfiguration(String id) =>
+      _home._hostSelectBuildConfiguration(id);
+
+  @override
+  Future<void> selectDevice(String id) => _home._hostSelectDevice(id);
+
+  @override
+  Future<void> buildProject() => _home._startBuild();
+
+  @override
+  Future<void> runProject() => _home._startPlaySession();
+
+  @override
+  Future<void> stopProject() => _home._session.stop();
+
+  @override
+  Future<void> hotReload() => _home._session.restart(fullRestart: false);
+
+  @override
+  Future<void> hotRestart() => _home._session.restart();
+
+  @override
+  Future<void> reloadScene() => _home._session.reloadScenes();
+
+  @override
+  Future<void> importModel(
+    String path, {
+    String? parentId,
+    double scale = 1.0,
+  }) => importLinkedModel(
+    _home._requireController,
+    path,
+    GlbImportOptions(scale: scale),
+    parentId: parentId == null ? null : LocalId.parse(parentId),
+  );
+
+  @override
+  Future<void> importEnvironment(String path) =>
+      importEnvironmentMap(_home._requireController, path);
+
+  @override
+  String get toolMode => _home._uiHandle.toolMode;
+
+  @override
+  List<String> get toolModes => EditorUiHandle.toolModes;
+
+  @override
+  void setToolMode(String mode) => _home._uiHandle.setToolMode(mode);
+
+  @override
+  List<String> get panels => _home._uiHandle.panels;
+
+  @override
+  void showPanel(String id) => _home._uiHandle.showPanel(id);
+
+  @override
+  void focusPanel(String id) => _home._uiHandle.showPanel(id, focus: true);
+
+  @override
+  List<String> get viewportDebugModes => [
+    for (final mode in _home._renderGraphMcp.listModes()) mode['id'] as String,
+  ];
+
+  @override
+  void setViewportDebugMode(String mode) => _home._renderGraphMcp.setMode(mode);
+}
+
+/// Lets view commands drive the viewport the same way the UI does.
+class _EditorViewHost implements ViewHost {
+  _EditorViewHost(this._home);
+
+  final _EditorHomeState _home;
+
+  @override
+  EditorCameraSpec get camera {
+    final pose = _home._cameraHandle.pose;
+    if (pose == null) {
+      throw const CommandException('The viewport has no camera yet');
+    }
+    return EditorCameraSpec(
+      azimuth: pose.azimuth,
+      elevation: pose.elevation,
+      radius: pose.radius,
+      target: pose.target,
+      orthographic: pose.orthographic,
+    );
+  }
+
+  @override
+  void setCamera(EditorCameraSpec pose) => _home._cameraHandle.setPose(
+    azimuth: pose.azimuth,
+    elevation: pose.elevation,
+    radius: pose.radius,
+    target: pose.target,
+    orthographic: pose.orthographic,
+  );
+
+  @override
+  bool frame(Iterable<LocalId> ids) {
+    Aabb3? bounds;
+    for (final id in ids) {
+      final node = _home._requireController.liveNode(id);
+      final nodeBounds = node?.combinedWorldBounds;
+      if (nodeBounds == null) continue;
+      bounds = bounds == null ? nodeBounds : (bounds..hull(nodeBounds));
+    }
+    if (bounds == null) return false;
+    _home._cameraHandle.frame(bounds);
+    return true;
   }
 }

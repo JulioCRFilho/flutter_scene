@@ -550,10 +550,17 @@ class MeshGeometry extends UnskinnedGeometry {
       );
     }
     ByteData? indexBytes;
+    TypedData? indexUpload;
     var indexType = gpu.IndexType.int16;
     if (indices != null) {
       final packed = InterleavedLayoutAdapter.packIndices(indices);
       indexBytes = ByteData.sublistView(packed.bytes);
+      // The same bytes again, as the integer list they already are, so the
+      // upload keeps their element type; see Geometry._uploadStreams.
+      indexUpload = InterleavedLayoutAdapter.indexUploadView(
+        packed.bytes,
+        is32Bit: packed.is32Bit,
+      );
       indexType = packed.is32Bit ? gpu.IndexType.int32 : gpu.IndexType.int16;
       if (retainCpuData) _packedIndexBytes = packed.bytes;
       _packedIndices32Bit = packed.is32Bit;
@@ -566,7 +573,7 @@ class MeshGeometry extends UnskinnedGeometry {
       texCoords1: retainCpuData ? _cpuTexCoords1 : texCoords1,
       colors: retainCpuData ? _cpuColors : colors,
       tangents: retainCpuData ? _cpuTangents : tangents,
-      indices: indexBytes,
+      indices: indexUpload,
       indexType: indexType,
       bufferArena: bufferArena,
       retainCpuData: retainCpuData,

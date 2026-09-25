@@ -180,6 +180,39 @@ abstract class EditorControllerBase extends ChangeNotifier {
   /// The current selection.
   Selection get selection => session.selection;
 
+  /// Selects [ids], replacing the selection unless [mode] says otherwise
+  /// (`add`, `remove`, `toggle`).
+  ///
+  /// Goes through the `selectNodes` command, so a click, a script, and an
+  /// agent take one path, and the change lands on the undo history.
+  void select(Iterable<LocalId> ids, {String mode = 'replace'}) {
+    final nodeIds = [for (final id in ids) id.toToken()];
+    if (nodeIds.isEmpty && mode == 'replace') {
+      clearSelection();
+      return;
+    }
+    unawaited(run('selectNodes', {'nodeIds': nodeIds, 'mode': mode}));
+  }
+
+  /// Selects exactly [id].
+  void selectOnly(LocalId id) => select([id]);
+
+  /// Selects what an edit just created, without adding a step of its own.
+  /// The selection folds into the edit, so undo and redo move together.
+  void selectAfterEdit(Iterable<LocalId> ids) {
+    final list = ids.toList();
+    if (list.isEmpty) return;
+    selection.set(list);
+    session.history.syncSelectionAfter();
+    notifyListeners();
+  }
+
+  /// Clears the selection.
+  void clearSelection() {
+    if (selection.isEmpty) return;
+    unawaited(run('clearSelection'));
+  }
+
   /// Read-only scene-graph queries.
   SceneQuery get query => session.query;
 
@@ -444,26 +477,53 @@ abstract class EditorControllerBase extends ChangeNotifier {
     }
   }
 
-  Future<List<Transaction>> runAll(
-    List<(String name, Map<String, Object?> params)> commands,
-  ) async {
-    final committed = <Transaction>[];
-    Object? firstError;
-    for (final (name, params) in commands) {
-      try {
-        final transaction = session.run(name, params);
-        if (!transaction.isEmpty) {
-          await _reflect(transaction);
-          committed.add(transaction);
-        }
-      } catch (error) {
-        firstError ??= error;
-        lastError.value = '$name, $error';
+  Future<Transaction> runAll(
+    Iterable<Object> calls, {
+    String name = 'Batch edit',
+    Map<String, LocalId>? bindings,
+  }) async {
+    final resolvedCalls = calls.map((call) {
+      if (call is CommandCall) return call;
+      if (call is (String, Map<String, Object?>)) {
+        return CommandCall(call.$1, call.$2);
       }
+      throw ArgumentError(
+        'Expected CommandCall or (String, Map<String, Object?>), got $call',
+      );
+    });
+    try {
+      final transaction = session.runAll(
+        resolvedCalls,
+        name: name,
+        bindings: bindings,
+      );
+      await _reflect(transaction);
+      notifyListeners();
+      return transaction;
+    } catch (error) {
+      lastError.value = '$name, $error';
+      rethrow;
     }
-    if (committed.isNotEmpty) notifyListeners();
-    if (firstError != null) throw firstError;
-    return committed;
+  }
+
+  /// Runs the command named [name] whatever its kind, so a caller that takes
+  /// commands from the registry (the palette, a menu, an extension) does not
+  /// have to know which ones are asynchronous. Application commands await
+  /// their work and return null; every other kind goes through [run].
+  Future<Transaction?> invoke(
+    String name, [
+    Map<String, Object?> params = const {},
+  ]) async {
+    final entry = session.registry.lookup(name);
+    if (entry?.kind != CommandKind.application) return run(name, params);
+    try {
+      await session.invoke(name, params);
+      notifyListeners();
+      return null;
+    } catch (error) {
+      lastError.value = '$name, $error';
+      rethrow;
+    }
   }
 
   Future<void> importSceneIntoScene(
@@ -486,10 +546,7 @@ abstract class EditorControllerBase extends ChangeNotifier {
     }
     await _realizeAll();
     if (graft.rootIds.isNotEmpty) {
-      selection.selectOnly(graft.rootIds.first);
-      for (final id in graft.rootIds.skip(1)) {
-        selection.add(id);
-      }
+      selectAfterEdit(graft.rootIds);
     }
     notifyListeners();
   }

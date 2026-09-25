@@ -40,11 +40,17 @@ class SmokeScene {
     this.preload,
     this.warmupFrames = 0,
     this.fullCoverage = false,
+    this.colorPassCounters,
   });
 
   final String id;
   final ({Scene scene, Camera camera}) Function() setup;
   final Future<void> Function()? preload;
+
+  /// Counters the captured frame's `ScenePass` must report exactly, keyed
+  /// as `RenderCounters.toJson` names them. For pinning a statistic the
+  /// image cannot show.
+  final Map<String, int>? colorPassCounters;
 
   /// Frames to render before the capture, for a feature that converges over
   /// time instead of resolving in one frame.
@@ -480,6 +486,35 @@ Future<void> loadMorphSkinnedModel() async {
   }
   _morphSkinnedRest = rest;
   _morphSkinnedModel = model;
+}
+
+/// The skinned tube whose weights sum to 0.98, for the skinned_weight_sum
+/// scene. Its targets stay at rest, so only the skin deforms it.
+Node? _weightSumModel;
+
+Future<void> loadWeightSumModel() async {
+  _weightSumModel ??= await Node.fromGlbBytes(
+    buildMorphSkinnedGlb(weightSum: 0.98),
+  );
+}
+
+/// A 64x64 PNG, a one-texel black and white checkerboard, uploaded through
+/// the encoded-image path by [loadMipChecker]. Every level above the base
+/// averages to one flat gray, so a minified sample shows which light the
+/// chain was built in.
+const String _kMipCheckerPng =
+    'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAb0lEQVR42u3SsQ0AMBCEsNt/abJH3hU1'
+    'kle1ravd5fmqEUAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQ'
+    'QAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEPBBH0+m2kofJeShAAAAAElFTkSuQmCC';
+
+Texture2D? _mipChecker;
+
+/// Decodes and uploads the checkerboard once, on whatever path the backend
+/// has for encoded images. Call before pumping the texture_mips scene.
+Future<void> loadMipChecker() async {
+  _mipChecker ??= await Texture2D.fromEncodedBytes(
+    base64Decode(_kMipCheckerPng),
+  );
 }
 
 /// The Draco-compressed KTX2-textured quads preloaded by [loadBasisuQuads].
@@ -1633,6 +1668,34 @@ final List<SmokeScene> kSmokeScenes = <SmokeScene>[
     );
     return (scene: scene, camera: _camera());
   }),
+  // One PNG uploaded through the encoded-image path on two unlit quads. The
+  // near quad is texel-sized, so its checker resolves; the far quad is minified
+  // to a level the box filter has collapsed to a flat gray. Averaged in linear
+  // light that gray is 188, averaged in sRGB space it is 128, so the far quad
+  // reads whether this backend's chain (CPU or GPU) matches the others. The
+  // scene renders at the view's pixel ratio while the capture is logical, so
+  // the far quad is small enough to stay past level 1 at a ratio of 3.
+  SmokeScene('texture_mips', () {
+    final material = UnlitMaterial()..baseColorTexture = _mipChecker!;
+    final scene = Scene();
+    // The rotation turns each plane to face +z, square on to the camera.
+    Node quad(double size, vm.Vector3 position) =>
+        Node(
+            mesh: Mesh(PlaneGeometry(width: size, depth: size), material),
+          )
+          ..localTransform =
+              vm.Matrix4.translation(position) *
+              vm.Matrix4.rotationX(math.pi / 2);
+    scene.add(quad(0.8, vm.Vector3(0.45, 0, 0)));
+    scene.add(quad(0.03, vm.Vector3(-0.45, 0, 0)));
+    return (
+      scene: scene,
+      camera: PerspectiveCamera(
+        position: vm.Vector3(0, 0, 2.2),
+        target: vm.Vector3.zero(),
+      ),
+    );
+  }, preload: loadMipChecker),
   // Two quads sampling KHR_texture_basisu KTX2 textures through the standard
   // glTF path, one a mipped zstd-supercompressed UASTC sRGB file with no
   // alpha, the other an ETC1S sRGB file whose alpha blob is drawn with alpha
@@ -1875,6 +1938,67 @@ final List<SmokeScene> kSmokeScenes = <SmokeScene>[
       ),
     );
   }, preload: loadMorphSkinnedModel),
+  // The skinned tube with its weights summing to 0.98, placed 3 km from the
+  // origin. A joint matrix carries the model's world position, so an
+  // unnormalized weight sum pulls every vertex toward the origin by 2% of
+  // that distance (60 m here) and the tube draws as rails; the normalized
+  // sum keeps it whole. No CI lane honors mediump, so the small-scale normal
+  // underflow the vertex-stage normalization also fixes has no capture.
+  SmokeScene('skinned_weight_sum', () {
+    final scene = Scene();
+    final model = _weightSumModel!;
+    model.localTransform = vm.Matrix4.translation(vm.Vector3(3000, 0, 0));
+    scene.add(model);
+    return (
+      scene: scene,
+      camera: PerspectiveCamera(
+        position: vm.Vector3(3000.5, 2.0, -5.6),
+        target: vm.Vector3(3000, 0.9, 0),
+      ),
+    );
+  }, preload: loadWeightSumModel),
+  // Nine unit cubes ahead of the camera and twenty-seven behind it. The
+  // frame shows the nine; the counters have to say the other twenty-seven
+  // were culled, which is what a rejected BVH subtree never reported.
+  SmokeScene('bvh_culled', () {
+    final scene = Scene();
+    var index = 0;
+    void cube(double x, double y, double z) {
+      final tint = vm.Vector4(
+        0.25 + 0.75 * (index % 3) / 2,
+        0.25 + 0.75 * ((index ~/ 3) % 3) / 2,
+        0.9,
+        1,
+      );
+      scene.add(
+        Node(
+          name: 'cube${index++}',
+          mesh: Mesh(
+            CuboidGeometry(vm.Vector3.all(1)),
+            UnlitMaterial()..baseColorFactor = tint,
+          ),
+        )..position = vm.Vector3(x, y, z),
+      );
+    }
+
+    for (var row = -1; row <= 1; row++) {
+      for (var column = -1; column <= 1; column++) {
+        cube(column * 1.6, row * 1.6, 6);
+      }
+    }
+    for (var row = -1; row <= 1; row++) {
+      for (var column = -4; column <= 4; column++) {
+        cube(column * 1.6, row * 1.6, -6);
+      }
+    }
+    return (
+      scene: scene,
+      camera: PerspectiveCamera(
+        position: vm.Vector3.zero(),
+        target: vm.Vector3(0, 0, 1),
+      ),
+    );
+  }, colorPassCounters: const {'draws': 9, 'submitted': 36, 'culled': 27}),
 
   // A hand-written vertex/fragment pair driven through ShaderMaterial, with no
   // engine vertex shader involved. The vertex stage displaces the grid along

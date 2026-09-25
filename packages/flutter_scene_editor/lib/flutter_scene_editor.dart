@@ -17,6 +17,7 @@ export 'package:flutter_scene_mcp/flutter_scene_mcp.dart'
 export 'src/controller/editor_controller.dart' show EditorController;
 export 'src/controller/animation_preview_intent.dart'
     show AnimationPreviewTarget, applyAnimationPreviewRequest;
+export 'src/shell/editor_ui_handle.dart' show EditorUiHandle;
 export 'src/io/glb_import_options.dart'
     show GlbImportOptions, ImportUpAxis, showGlbImportOptions;
 export 'src/io/scene_io.dart'

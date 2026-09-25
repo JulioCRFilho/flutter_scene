@@ -9,6 +9,7 @@ import 'package:vector_math/vector_math.dart' show Matrix4;
 import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
 import 'package:flutter_scene/src/light.dart';
 import 'package:flutter_scene/src/material/dfg_lut.dart';
+import 'package:flutter_scene/src/material/dfg_lut_data.dart';
 
 import 'package:flutter_scene/src/material/environment.dart';
 import 'package:flutter_scene/src/material/instance_attributes.dart';
@@ -87,6 +88,26 @@ abstract class Material {
   /// Returns [texture] if non-null, otherwise [getWhitePlaceholderTexture].
   static gpu.Texture whitePlaceholder(gpu.Texture? texture) {
     return texture ?? getWhitePlaceholderTexture();
+  }
+
+  static gpu.Texture? _transparentPlaceholderTexture;
+
+  /// Returns a 1x1 fully transparent texture, lazily created on first use.
+  ///
+  /// Composites as a no-op under premultiplied source-over, so a pass whose
+  /// layer is absent this frame can bind it and blend nothing.
+  static gpu.Texture getTransparentPlaceholderTexture() {
+    if (_transparentPlaceholderTexture != null) {
+      return _transparentPlaceholderTexture!;
+    }
+    final texture = gpu.gpuContext.createTexture(
+      gpu.StorageMode.hostVisible,
+      1,
+      1,
+    );
+    texture.overwrite(Uint32List.fromList(<int>[0]).buffer.asByteData());
+    _transparentPlaceholderTexture = texture;
+    return texture;
   }
 
   static gpu.Texture? _normalPlaceholderTexture;
@@ -177,15 +198,59 @@ abstract class Material {
       final ltc = await rootBundle.load(
         'packages/flutter_scene/assets/ltc.bin',
       );
+      final dfg = await _loadDfgTable();
       _brdfLutTexture = buildBrdfLutTexture(
         ltcHalfData: ltc.buffer.asUint16List(
           ltc.offsetInBytes,
           ltc.lengthInBytes ~/ 2,
         ),
+        dfgHalfData: dfg,
       );
     }
     await PhysicallyBasedMaterial.initializeStaticResources();
   }
+
+  /// Reads the precomputed DFG table, or integrates it off the current isolate
+  /// when the asset is missing (an app bundling its own trimmed copy of the
+  /// package's assets).
+  ///
+  /// The integration is 4.19 M Monte-Carlo samples, a few hundred
+  /// milliseconds of solid CPU, which is why it never runs on the isolate that
+  /// renders. It is also why the fallback is loud. Losing the asset costs
+  /// every cold start that time for a table that is the same bytes on every
+  /// device, and silently paying it is worse than being told.
+  static Future<Uint16List> _loadDfgTable() async {
+    String? fallbackReason;
+    try {
+      final data = await rootBundle.load(
+        'packages/flutter_scene/assets/dfg.bin',
+      );
+      if (data.lengthInBytes == kDfgLutTileBytes) {
+        return data.buffer.asUint16List(
+          data.offsetInBytes,
+          data.lengthInBytes ~/ 2,
+        );
+      }
+      fallbackReason =
+          'it is ${data.lengthInBytes} bytes, expected $kDfgLutTileBytes';
+    } catch (error) {
+      fallbackReason = 'it could not be read ($error)';
+    }
+    final message =
+        'flutter_scene: packages/flutter_scene/assets/dfg.bin is unusable, '
+        '$fallbackReason. Integrating the environment BRDF instead, which '
+        'costs a few hundred milliseconds of CPU at every cold start. Ship '
+        "the package's assets unmodified to avoid it.";
+    debugPrint(message);
+    assert(false, message);
+    return compute<Object?, Uint16List>(
+      _integrateDfgTable,
+      null,
+      debugLabel: 'flutter_scene environment BRDF integration',
+    );
+  }
+
+  static Uint16List _integrateDfgTable(Object? _) => buildDfgLutHalfData();
 
   /// The name of this material, used for identification.
   ///
@@ -491,7 +556,9 @@ abstract class Material {
   /// screen-space chain, the shadow catcher, overrides this to true so
   /// occlusion is evaluated at its own depth instead of the backdrop's.
   @internal
-  bool get depthPrepassParticipates => isOpaque();
+  // A display-referred surface is composited past the scene's depth, so it
+  // must not seed the prepass that ambient occlusion and reflections read.
+  bool get depthPrepassParticipates => isOpaque() && !displayReferred;
 
   /// Whether this material currently draws nothing at all, keeping its render
   /// items out of every pass (color, depth prepass, shadows).
@@ -518,6 +585,21 @@ abstract class Material {
   bool isOpaque() {
     return true;
   }
+
+  /// Whether this material's color is display-referred (already final screen
+  /// values) rather than scene-referred radiance.
+  ///
+  /// A display-referred surface is drawn into its own layer past the tone
+  /// curve and composited onto the resolved image, so its colors survive
+  /// exactly. Captured widgets are the motivating case, and
+  /// `WidgetComponent` turns it on for the material it owns. The surface is
+  /// still depth-tested against the scene, but it receives no exposure,
+  /// grading, tone mapping, fog, bloom or depth of field, and it is not
+  /// ordered against translucent geometry.
+  ///
+  /// A material that returns true must write display-encoded color
+  /// premultiplied by alpha, not linear HDR.
+  bool get displayReferred => false;
 
   /// Whether this material's fragment shader declares the `DebugViewInfo`
   /// block and switches on it (see `material_debug.glsl`), so the scene's

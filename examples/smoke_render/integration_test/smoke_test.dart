@@ -8,11 +8,15 @@ import 'package:flutter/services.dart';
 import 'package:flutter_scene/noise.dart';
 import 'package:flutter_scene/scene.dart';
 // ignore: implementation_imports
+import 'package:flutter_scene/src/render/env_prefilter.dart'
+    show radiancePrefilterPending;
+// ignore: implementation_imports
 import 'package:flutter_scene/src/render/frame_transients.dart'
     show rendererSubmissions;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:smoke_render/smoke_scenes.dart';
+import 'package:vector_math/vector_math.dart' as vm;
 
 const _expectedAndroidImpellerBackend = String.fromEnvironment(
   'SMOKE_EXPECTED_ANDROID_IMPELLER_BACKEND',
@@ -105,6 +109,7 @@ void main() {
           markNeedsPaint: i > 0 ? boundary.markNeedsPaint : null,
         );
       }
+      await _drainRadianceFills(tester, scene, settleStep, boundary);
       await _capturableFrame(tester, scene, settleStep, paced, boundary);
 
       final ui.Image image = await boundary.toImage(pixelRatio: 1.0);
@@ -118,6 +123,7 @@ void main() {
       captures['${smoke.id}.png'] = base64Encode(png.buffer.asUint8List());
 
       final stats = _frameStats(rgba, image.width, image.height);
+      final colorPass = _colorPassCounters(scene);
       // ignore: avoid_print
       print(
         'SMOKE ${smoke.id}: ${image.width}x${image.height} '
@@ -127,7 +133,9 @@ void main() {
         'cornersClear=${stats.cornersClear} '
         'centerCoverage=${stats.centerNonClearFraction.toStringAsFixed(3)} '
         'fgLuma=${stats.foregroundMeanLuma.toStringAsFixed(1)} '
-        'colors=${stats.distinctColors}',
+        'colors=${stats.distinctColors} '
+        'draws=${colorPass?.draws} submitted=${colorPass?.submitted} '
+        'culled=${colorPass?.culled}',
       );
       _settleMaxMs = _settleTimeouts = _repumps = 0;
 
@@ -163,6 +171,19 @@ void main() {
         greaterThan(8),
         reason: 'frame looks uniform; possible blank render',
       );
+      // A scene may pin counters instead of pixels.
+      final expectedCounters = smoke.colorPassCounters;
+      if (expectedCounters != null) {
+        expect(colorPass, isNotNull, reason: 'no ScenePass in the frame stats');
+        final actual = colorPass!.toJson();
+        for (final entry in expectedCounters.entries) {
+          expect(
+            actual[entry.key],
+            entry.value,
+            reason: 'ScenePass ${entry.key} for the captured frame',
+          );
+        }
+      }
       if (smoke.id == 'irradiance_field') {
         // Both colored walls are emissive and nothing else lights the scene,
         // so the floor's color is entirely bounce light carried by the probe
@@ -607,6 +628,118 @@ void main() {
     expect(none.$2, lessThan(60), reason: 'no-AA frame center $none');
   });
 
+  testWidgets('a display-referred surface keeps its colours', (tester) async {
+    // Pixel-level guard for the display-referred layer (issue #382). A
+    // scene-referred quad is transformed by whatever tone curve is set; a
+    // display-referred one must arrive byte-exact under every one of them.
+    await tester.pumpWidget(
+      const MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: Scaffold(backgroundColor: kSmokeClear, body: SizedBox.expand()),
+      ),
+    );
+    await tester.pump();
+    await Scene.initializeStaticResources();
+
+    final material = UnlitMaterial()
+      ..alphaMode = AlphaMode.opaque
+      ..displayReferred = true;
+    final scene = Scene()..environment = EnvironmentMap.empty();
+    scene.add(
+      Node(mesh: Mesh(CuboidGeometry(vm.Vector3(4, 4, 0.01)), material)),
+    );
+
+    final boundaryKey = GlobalKey();
+    await tester.pumpWidget(
+      MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: Scaffold(
+          backgroundColor: kSmokeClear,
+          body: Center(
+            child: RepaintBoundary(
+              key: boundaryKey,
+              child: SizedBox(
+                width: kSmokeSize.toDouble(),
+                height: kSmokeSize.toDouble(),
+                child: SceneView(
+                  scene,
+                  camera: PerspectiveCamera(position: vm.Vector3(0, 0, 3)),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    // Android software rendering pays for every frame, so settle in fewer,
+    // longer steps there, matching the scene loop above.
+    final isAndroid =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+    final frames = isAndroid ? 2 : 10;
+    Future<int> render(int value, ToneMappingMode mode) async {
+      final pixels = Uint8List(4 * 4 * 4);
+      for (var i = 0; i < pixels.length; i += 4) {
+        pixels[i] = value;
+        pixels[i + 1] = value;
+        pixels[i + 2] = value;
+        pixels[i + 3] = 255;
+      }
+      material.baseColorTexture = Texture2D.fromPixels(pixels, 4, 4);
+      scene.toneMapping = mode;
+
+      await _settleGpu();
+      var paced = false;
+      for (var i = 0; i < frames; i++) {
+        paced = await _pumpSettled(
+          tester,
+          scene,
+          const Duration(milliseconds: 50),
+        );
+      }
+      await _capturableFrame(
+        tester,
+        scene,
+        const Duration(milliseconds: 50),
+        paced,
+        null,
+      );
+
+      final boundary =
+          boundaryKey.currentContext!.findRenderObject()
+              as RenderRepaintBoundary;
+      final ui.Image image = await boundary.toImage(pixelRatio: 1.0);
+      final rgba = (await image.toByteData(
+        format: ui.ImageByteFormat.rawRgba,
+      ))!;
+      final o = ((image.height ~/ 2) * image.width + image.width ~/ 2) * 4;
+      final red = rgba.getUint8(o);
+      image.dispose();
+      return red;
+    }
+
+    // Near-black is where the default operator's black-point term does its
+    // worst (27 resolves to 2 scene-referred), so it earns a row.
+    const inputs = [255, 128, 27];
+    final mismatches = <String>[];
+    for (final mode in ToneMappingMode.values) {
+      final row = <String>[];
+      for (final value in inputs) {
+        final out = await render(value, mode);
+        row.add('$value->$out');
+        if (out != value) mismatches.add('${mode.name} $value gave $out');
+      }
+      debugPrint('SMOKE display_referred ${mode.name}: ${row.join('  ')}');
+    }
+    expect(
+      mismatches,
+      isEmpty,
+      reason:
+          'a display-referred surface must reach the screen unchanged, '
+          'whatever the scene tone curve is',
+    );
+  });
+
   tearDownAll(() {
     binding.reportData = <String, dynamic>{...captures};
   });
@@ -664,6 +797,17 @@ _frameStats(ByteData rgba, int w, int h) {
   );
 }
 
+/// The color pass's counters for the frame [scene] last rendered, or null
+/// when no frame has rendered or none of its passes is the color pass.
+RenderCounters? _colorPassCounters(Scene scene) {
+  final views = scene.renderStats.latest?.views;
+  if (views == null || views.isEmpty) return null;
+  for (final pass in views.first.passes) {
+    if (pass.name == 'ScenePass') return pass.counters;
+  }
+  return null;
+}
+
 /// Waits for the GPU to finish the frame the last pump submitted, so the next
 /// pump renders instead of re-presenting under `Scene.maxGpuFramesInFlight`
 /// and the capture is the frame the last pump drew. Bounded, since the
@@ -700,6 +844,38 @@ Future<bool> _pumpSettled(
 /// Vulkan host signals some fences only when the next frame presents, so a
 /// pump right after such a frame is paced no matter how long the wait; pump
 /// again until one renders, bounded.
+/// Pumps until no environment is still filling its radiance.
+///
+/// A scene refines its radiance a roughness band per frame so one oversized
+/// prefilter cannot stall the display, which leaves an environment an
+/// approximation for its first few frames. These captures settle a single
+/// frame on Android (the emulator watchdog terminates sustained software
+/// rendering), so without this they would photograph the approximation there
+/// and the converged image everywhere else, then compare the two against one
+/// baseline.
+///
+/// Pumping is what the fill paces against, so this drives it rather than
+/// waiting on it. Forcing the prefilter into one submission instead puts back
+/// exactly the stall the pacing exists to avoid, which on the software Vulkan
+/// emulator is enough to time the device out.
+Future<void> _drainRadianceFills(
+  WidgetTester tester,
+  Scene scene,
+  Duration settleStep,
+  RenderRepaintBoundary boundary,
+) async {
+  // One pump per band, plus slack for an environment built during the drain.
+  const maxPumps = kPrefilterBandCount * 2;
+  for (var i = 0; i < maxPumps && radiancePrefilterPending; i++) {
+    await _pumpSettled(
+      tester,
+      scene,
+      settleStep,
+      markNeedsPaint: boundary.markNeedsPaint,
+    );
+  }
+}
+
 Future<void> _capturableFrame(
   WidgetTester tester,
   Scene scene,

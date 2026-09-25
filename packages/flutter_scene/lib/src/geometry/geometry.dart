@@ -14,6 +14,14 @@ import 'package:vector_math/vector_math.dart' as vm;
 import 'package:flutter_scene/src/shaders.dart';
 import 'package:flutter_scene/src/render/frame_transients.dart';
 
+/// [data] as a [ByteData], without copying when it already is one.
+///
+/// Only for CPU-side retention and reinterpretation. An upload keeps the
+/// element type instead, so it never goes through here (see
+/// [Geometry._uploadStreams]).
+ByteData _asByteData(TypedData data) =>
+    data is ByteData ? data : ByteData.sublistView(data);
+
 /// Packs immutable mesh uploads into shared GPU buffers.
 ///
 /// Pass one arena to many `MeshGeometry` objects to avoid one GPU allocation
@@ -418,19 +426,30 @@ abstract class Geometry {
     );
   }
 
-  /// Allocates a [gpu.DeviceBuffer] and uploads [vertices] (and optional
-  /// [indices]) into it in one step.
+  /// Allocates GPU storage and uploads [vertices] (and optional [indices])
+  /// into it in one step.
   ///
   /// The vertices must match this geometry subclass's expected interleaved
   /// layout (72 bytes per vertex for [UnskinnedGeometry], 104 bytes for
   /// [SkinnedGeometry]). The subclass may split the interleaved bytes into
   /// several tightly packed streams (see [_vertexStreamBytes]); the streams
-  /// and any [indices] are packed back-to-back into one buffer, the streams
-  /// bound via [setVertexStreams] and the indices via [setIndices].
+  /// are bound via [setVertexStreams] and the indices via [setIndices].
+  ///
+  /// How many [gpu.DeviceBuffer]s that takes, and where in them the indices
+  /// land, is the backend's to decide (see [_uploadStreams]), so read the
+  /// bound [gpu.BufferView]s rather than assuming a layout. Native packs the
+  /// streams and indices back to back into one buffer; web gives each role a
+  /// buffer of its own, since WebGL2 types a buffer on first bind.
+  ///
+  /// Pass [vertices] and [indices] as the element type their store was
+  /// allocated as (the engine's packers build interleaved vertices in a
+  /// [Float32List] and indices in a [Uint16List] or [Uint32List]); a
+  /// [ByteData] over one of those costs a per-element read to upload on web.
+  /// See [_uploadStreams].
   void uploadVertexData(
-    ByteData vertices,
+    TypedData vertices,
     int vertexCount,
-    ByteData? indices, {
+    TypedData? indices, {
     gpu.IndexType indexType = gpu.IndexType.int16,
   }) {
     final stride = _expectedVertexStrideInBytes;
@@ -447,8 +466,9 @@ abstract class Geometry {
       );
     }
 
-    _cpuVertices = vertices;
-    _cpuIndices = indices;
+    final vertexBytes = _asByteData(vertices);
+    _cpuVertices = vertexBytes;
+    _cpuIndices = indices == null ? null : _asByteData(indices);
 
     _uploadStreams(
       _vertexStreamBytes(vertices, vertexCount),
@@ -459,19 +479,43 @@ abstract class Geometry {
     );
 
     if (_localBounds == null && vertexCount > 0 && _autoScanBoundsOnUpload) {
-      _scanLocalBoundsFromVertices(vertices, vertexCount);
+      _scanLocalBoundsFromVertices(vertexBytes, vertexCount);
     }
   }
 
   /// Packs [streams] (one tightly packed buffer per vertex slot) and any
-  /// [indices] back-to-back into a single host-visible [gpu.DeviceBuffer],
-  /// binding the streams via [setVertexStreams] and the indices via
-  /// [setIndices]. Shared by the interleaved and structure-of-arrays upload
-  /// paths.
+  /// [indices] into host-visible [gpu.DeviceBuffer] storage, binding the
+  /// streams via [setVertexStreams] and the indices via [setIndices]. Shared
+  /// by the interleaved and structure-of-arrays upload paths.
+  ///
+  /// A [GeometryBufferArena] allocation is one block, indices after vertices.
+  /// Otherwise the storage comes from [gpu.createGeometryBuffers], which is
+  /// the same single buffer on native and one buffer per role on web.
+  // TODO(web-buffers): An arena allocation still shares one staged buffer on
+  // web, so it keeps the CPU mirror and the second upload this path drops.
+  // Splitting it wants an arena per role, or per-role blocks within one.
+  ///
+  /// [streams] and [indices] are [TypedData] rather than [ByteData] so a
+  /// caller holding, say, a [Float32List] can pass it as one: the web backend
+  /// under dart2wasm reads a typed list far faster as itself than through a
+  /// byte view. A [ByteData] is still accepted everywhere.
+  ///
+  /// Pass each one as the element type its BACKING STORE was allocated as,
+  /// which is not always the type the producer hands back. Under dart2wasm a
+  /// view whose element type differs from its store is read element by
+  /// element, and 4.65 MB costs 1.4 ms as a [Float32List] over float storage
+  /// against 90 ms as a [Float32List] over byte storage, 165 ms as a
+  /// [Uint16List] over byte storage, and 340 ms as a [Uint8List] over float
+  /// storage. Nothing here can detect a mismatch, so each producer documents
+  /// what it allocates: the interleaved packers and
+  /// `InterleavedLayoutAdapter.unskinnedAttributeStreams` build float
+  /// storage, `splitUnskinnedAttributes` and `.fscene` payloads are byte
+  /// storage, and packed indices are their own width (see
+  /// `InterleavedLayoutAdapter.indexUploadView`).
   void _uploadStreams(
-    List<ByteData> streams,
+    List<TypedData> streams,
     int vertexCount,
-    ByteData? indices,
+    TypedData? indices,
     gpu.IndexType indexType,
     GeometryBufferArena? bufferArena,
   ) {
@@ -484,18 +528,21 @@ abstract class Geometry {
     final allocation = bufferArena == null || totalBytes == 0
         ? null
         : bufferArena._allocate(totalBytes);
-    final gpu.DeviceBuffer deviceBuffer =
-        allocation?.buffer ??
-        gpu.gpuContext.createDeviceBuffer(
-          gpu.StorageMode.hostVisible,
-          totalBytes,
-        );
+    final split = allocation == null
+        ? gpu.createGeometryBuffers(vertexBytes, indices?.lengthInBytes ?? 0)
+        : null;
+    final gpu.DeviceBuffer deviceBuffer = allocation?.buffer ?? split!.vertex;
+    final gpu.DeviceBuffer indexBuffer = allocation?.buffer ?? split!.index;
     final baseOffset = allocation?.offsetInBytes ?? 0;
+    final indexOffset = split == null
+        ? baseOffset + vertexBytes
+        : split.indexBaseOffset;
 
     var offset = 0;
     final views = <gpu.BufferView>[];
     for (final stream in streams) {
-      deviceBuffer.overwrite(
+      gpu.writeGeometryData(
+        deviceBuffer,
         stream,
         destinationOffsetInBytes: baseOffset + offset,
       );
@@ -511,21 +558,33 @@ abstract class Geometry {
     setVertexStreams(views, vertexCount);
 
     if (indices != null) {
-      deviceBuffer.overwrite(
+      gpu.writeGeometryData(
+        indexBuffer,
         indices,
-        destinationOffsetInBytes: baseOffset + offset,
+        destinationOffsetInBytes: indexOffset,
       );
       setIndices(
         gpu.BufferView(
-          deviceBuffer,
-          offsetInBytes: baseOffset + offset,
+          indexBuffer,
+          offsetInBytes: indexOffset,
           lengthInBytes: indices.lengthInBytes,
         ),
         indexType,
       );
     }
     if (totalBytes > 0) {
-      deviceBuffer.flush(offsetInBytes: baseOffset, lengthInBytes: totalBytes);
+      if (identical(deviceBuffer, indexBuffer)) {
+        deviceBuffer.flush(
+          offsetInBytes: baseOffset,
+          lengthInBytes: totalBytes,
+        );
+      } else {
+        deviceBuffer.flush(
+          offsetInBytes: baseOffset,
+          lengthInBytes: vertexBytes,
+        );
+        indexBuffer.flush();
+      }
     }
   }
 
@@ -534,9 +593,9 @@ abstract class Geometry {
   ///
   /// The default keeps the interleaved bytes as a single stream (slot 0);
   /// [UnskinnedGeometry] overrides it to de-interleave position into its own
-  /// stream. Each returned [ByteData] is uploaded to its own buffer region by
-  /// [uploadVertexData].
-  List<ByteData> _vertexStreamBytes(ByteData vertices, int vertexCount) => [
+  /// stream. Each returned stream is uploaded to its own buffer region by
+  /// [uploadVertexData], keeping its element type (see [_uploadStreams]).
+  List<TypedData> _vertexStreamBytes(TypedData vertices, int vertexCount) => [
     vertices,
   ];
 
@@ -1083,18 +1142,18 @@ class UnskinnedGeometry extends Geometry {
   int get _expectedVertexStrideInBytes => kUnskinnedPerVertexSize;
 
   @override
-  List<ByteData> _vertexStreamBytes(ByteData vertices, int vertexCount) {
+  List<TypedData> _vertexStreamBytes(TypedData vertices, int vertexCount) {
     final streams = InterleavedLayoutAdapter.splitUnskinnedAttributes(
-      vertices,
+      _asByteData(vertices),
       vertexCount,
     );
     return [
-      ByteData.sublistView(streams.position),
-      ByteData.sublistView(streams.normal),
-      ByteData.sublistView(streams.texCoord),
-      ByteData.sublistView(streams.texCoord1),
-      ByteData.sublistView(streams.color),
-      ByteData.sublistView(streams.tangent),
+      streams.position,
+      streams.normal,
+      streams.texCoord,
+      streams.texCoord1,
+      streams.color,
+      streams.tangent,
     ];
   }
 
@@ -1115,7 +1174,7 @@ class UnskinnedGeometry extends Geometry {
     Float32List? texCoords1,
     Float32List? colors,
     Float32List? tangents,
-    ByteData? indices,
+    TypedData? indices,
     gpu.IndexType indexType = gpu.IndexType.int16,
     GeometryBufferArena? bufferArena,
     bool retainCpuData = true,
@@ -1131,12 +1190,12 @@ class UnskinnedGeometry extends Geometry {
     );
     _uploadStreams(
       [
-        ByteData.sublistView(streams.position),
-        ByteData.sublistView(streams.normal),
-        ByteData.sublistView(streams.texCoord),
-        ByteData.sublistView(streams.texCoord1),
-        ByteData.sublistView(streams.color),
-        ByteData.sublistView(streams.tangent),
+        Float32List.sublistView(streams.position),
+        Float32List.sublistView(streams.normal),
+        Float32List.sublistView(streams.texCoord),
+        Float32List.sublistView(streams.texCoord1),
+        Float32List.sublistView(streams.color),
+        Float32List.sublistView(streams.tangent),
       ],
       vertexCount,
       indices,
@@ -1151,7 +1210,7 @@ class UnskinnedGeometry extends Geometry {
         normals: Float32List.sublistView(streams.normal),
         colors: Float32List.sublistView(streams.color),
         tangents: Float32List.sublistView(streams.tangent),
-        indices: indices,
+        indices: indices == null ? null : _asByteData(indices),
       );
     }
     if (localBounds == null && vertexCount > 0) {
@@ -1173,17 +1232,17 @@ class UnskinnedGeometry extends Geometry {
   void uploadUnskinnedAttributeStreams(
     UnskinnedAttributeStreams streams,
     int vertexCount, {
-    ByteData? indices,
+    TypedData? indices,
     gpu.IndexType indexType = gpu.IndexType.int16,
   }) {
     _uploadStreams(
       [
-        ByteData.sublistView(streams.position),
-        ByteData.sublistView(streams.normal),
-        ByteData.sublistView(streams.texCoord),
-        ByteData.sublistView(streams.texCoord1),
-        ByteData.sublistView(streams.color),
-        ByteData.sublistView(streams.tangent),
+        streams.position,
+        streams.normal,
+        streams.texCoord,
+        streams.texCoord1,
+        streams.color,
+        streams.tangent,
       ],
       vertexCount,
       indices,
@@ -1197,7 +1256,7 @@ class UnskinnedGeometry extends Geometry {
       normals: Float32List.sublistView(streams.normal),
       colors: Float32List.sublistView(streams.color),
       tangents: Float32List.sublistView(streams.tangent),
-      indices: indices,
+      indices: indices == null ? null : _asByteData(indices),
     );
     if (localBounds == null && vertexCount > 0) {
       scanLocalBoundsFromPositions(

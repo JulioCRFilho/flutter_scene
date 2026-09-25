@@ -10,7 +10,12 @@ import 'package:scene/src/property_value.dart';
 /// emits TRS for clean diffs; the runtime composes a [Matrix4].
 /// {@category Documents}
 sealed class TransformSpec {
-  const TransformSpec();
+  const TransformSpec({this.unknown = const {}});
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// The transform as a 4x4 matrix.
   Matrix4 toMatrix4();
@@ -19,7 +24,7 @@ sealed class TransformSpec {
 /// A transform stored as an explicit 4x4 matrix.
 /// {@category Documents}
 class MatrixTransform extends TransformSpec {
-  MatrixTransform(this.matrix);
+  MatrixTransform(this.matrix, {super.unknown});
 
   /// The 4x4 local transform.
   final Matrix4 matrix;
@@ -31,10 +36,14 @@ class MatrixTransform extends TransformSpec {
 /// A transform stored as decomposed translation, rotation, and scale.
 /// {@category Documents}
 class TrsTransform extends TransformSpec {
-  TrsTransform({Vector3? translation, Quaternion? rotation, Vector3? scale})
-    : translation = translation ?? Vector3.zero(),
-      rotation = rotation ?? Quaternion.identity(),
-      scale = scale ?? Vector3(1, 1, 1);
+  TrsTransform({
+    Vector3? translation,
+    Quaternion? rotation,
+    Vector3? scale,
+    super.unknown,
+  }) : translation = translation ?? Vector3.zero(),
+       rotation = rotation ?? Quaternion.identity(),
+       scale = scale ?? Vector3(1, 1, 1);
 
   /// The translation component.
   final Vector3 translation;
@@ -56,8 +65,11 @@ class TrsTransform extends TransformSpec {
 /// {@category Documents}
 class ComponentSpec {
   /// Creates a component of the given [type] with optional [properties].
-  ComponentSpec(this.type, {Map<String, PropertyValue>? properties})
-    : properties = properties ?? {};
+  ComponentSpec(
+    this.type, {
+    Map<String, PropertyValue>? properties,
+    this.unknown = const {},
+  }) : properties = properties ?? {};
 
   /// The registered component type name (for example `mesh`,
   /// `directionalLight`, `camera`).
@@ -65,6 +77,11 @@ class ComponentSpec {
 
   /// The component's typed fields, keyed by field name.
   final Map<String, PropertyValue> properties;
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 }
 
 /// Whether a prefab instance's content loads eagerly with the scene or is
@@ -87,7 +104,13 @@ class PropertyOverride {
     required this.target,
     required this.path,
     required this.value,
+    this.unknown = const {},
   });
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// The node in the referenced prefab whose property is overridden.
   final LocalId target;
@@ -111,7 +134,12 @@ class PropertyOverride {
 /// {@category Documents}
 class Attachment {
   /// Attaches host node [node] under prefab-local [parent].
-  Attachment(this.node, {this.parent});
+  Attachment(this.node, {this.parent, this.unknown = const {}});
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// The host-document node id grafted into the instance.
   final LocalId node;
@@ -136,12 +164,18 @@ class PrefabInstanceSpec {
     List<ComponentSpec>? addedComponents,
     List<String>? removedComponentTypes,
     List<MemberComponent>? memberComponents,
+    this.unknown = const {},
   }) : overrides = overrides ?? [],
        attachments = attachments ?? [],
        removedNodes = removedNodes ?? [],
        addedComponents = addedComponents ?? [],
        removedComponentTypes = removedComponentTypes ?? [],
        memberComponents = memberComponents ?? [];
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// The referenced prefab `.fscene`.
   final AssetRef source;
@@ -183,6 +217,7 @@ class PrefabInstanceSpec {
     List<ComponentSpec>? addedComponents,
     List<String>? removedComponentTypes,
     List<MemberComponent>? memberComponents,
+    Map<String, Object?>? unknown,
   }) => PrefabInstanceSpec(
     source: source ?? this.source,
     load: load ?? this.load,
@@ -192,6 +227,7 @@ class PrefabInstanceSpec {
     addedComponents: addedComponents ?? this.addedComponents,
     removedComponentTypes: removedComponentTypes ?? this.removedComponentTypes,
     memberComponents: memberComponents ?? this.memberComponents,
+    unknown: unknown ?? this.unknown,
   );
 }
 
@@ -199,7 +235,16 @@ class PrefabInstanceSpec {
 /// {@category Documents}
 class MemberComponent {
   /// Creates a member-component record.
-  MemberComponent({required this.member, required this.component});
+  MemberComponent({
+    required this.member,
+    required this.component,
+    this.unknown = const {},
+  });
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// The target node's id in the prefab's own id space.
   final LocalId member;
@@ -228,12 +273,18 @@ class NodeSpec {
     this.instance,
     this.visible = true,
     this.shadowCastingMode = 'on',
+    this.unknown = const {},
   }) : transform = transform ?? TrsTransform(),
        children = children ?? [],
        components = components ?? [];
 
   /// This node's stable, document-scoped id.
   final LocalId id;
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// A non-identifying label (used for animation binding and name lookup).
   String name;
@@ -270,7 +321,12 @@ class NodeSpec {
 /// {@category Documents}
 class BoundsSpec {
   /// Creates bounds spanning [min] to [max].
-  BoundsSpec({required this.min, required this.max});
+  BoundsSpec({required this.min, required this.max, this.unknown = const {}});
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// The minimum corner.
   final Vector3 min;
@@ -282,24 +338,38 @@ class BoundsSpec {
 /// A shared, id-keyed resource referenced by nodes (and other resources).
 /// {@category Documents}
 sealed class ResourceSpec {
-  ResourceSpec(this.id);
+  ResourceSpec(this.id, {this.unknown = const {}});
 
   /// This resource's stable, document-scoped id.
   final LocalId id;
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 }
 
 /// A procedural geometry the runtime builds from parameters (rather than from
 /// baked vertex buffers). Compact and editable; no payload needed.
 /// {@category Documents}
 sealed class ProceduralGeometry {
-  const ProceduralGeometry();
+  const ProceduralGeometry({this.unknown = const {}});
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 }
 
 /// A box of the given [extents], optionally with per-corner debug colors.
 /// {@category Documents}
 class CuboidGeometrySpec extends ProceduralGeometry {
   /// Creates a cuboid spec.
-  CuboidGeometrySpec({required this.extents, this.debugColors = false});
+  CuboidGeometrySpec({
+    required this.extents,
+    this.debugColors = false,
+    super.unknown,
+  });
 
   /// The box dimensions.
   final Vector3 extents;
@@ -317,6 +387,7 @@ class PlaneGeometrySpec extends ProceduralGeometry {
     this.depth = 1.0,
     this.segmentsX = 1,
     this.segmentsZ = 1,
+    super.unknown,
   });
 
   /// Size along X.
@@ -336,7 +407,12 @@ class PlaneGeometrySpec extends ProceduralGeometry {
 /// {@category Documents}
 class SphereGeometrySpec extends ProceduralGeometry {
   /// Creates a sphere spec.
-  SphereGeometrySpec({this.radius = 0.5, this.segments = 32, this.rings = 16});
+  SphereGeometrySpec({
+    this.radius = 0.5,
+    this.segments = 32,
+    this.rings = 16,
+    super.unknown,
+  });
 
   /// The sphere radius.
   final double radius;
@@ -357,6 +433,7 @@ class TorusGeometrySpec extends ProceduralGeometry {
     this.tubeRadius = 0.15,
     this.radialSegments = 32,
     this.tubularSegments = 16,
+    super.unknown,
   });
 
   /// Distance from the origin to the tube center.
@@ -376,7 +453,11 @@ class TorusGeometrySpec extends ProceduralGeometry {
 /// {@category Documents}
 class IcosphereGeometrySpec extends ProceduralGeometry {
   /// Creates an icosphere spec.
-  IcosphereGeometrySpec({this.radius = 0.5, this.subdivisions = 2});
+  IcosphereGeometrySpec({
+    this.radius = 0.5,
+    this.subdivisions = 2,
+    super.unknown,
+  });
 
   /// Sphere radius.
   final double radius;
@@ -402,6 +483,7 @@ class GeometryResource extends ResourceSpec {
     this.topology = 'triangle',
     this.morphTargets,
     this.legacyWinding = false,
+    super.unknown,
   }) : assert(
          (vertices == null) != (procedural == null),
          'A geometry has exactly one source: a vertex payload or a procedural '
@@ -455,8 +537,14 @@ class MorphTargetsSpec {
     this.hasTangentDeltas = false,
     List<String>? targetNames,
     List<double>? defaultWeights,
+    this.unknown = const {},
   }) : targetNames = targetNames ?? const [],
        defaultWeights = defaultWeights ?? const [];
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// The binary chunk holding the delta slabs.
   final LocalId deltas;
@@ -483,11 +571,16 @@ class MorphTargetsSpec {
 /// {@category Documents}
 class TextureResource extends ResourceSpec {
   /// Creates a texture from an embedded [payload] or an external [asset].
-  TextureResource(super.id, {this.payload, this.asset, this.content = 'color'})
-    : assert(
-        (payload == null) != (asset == null),
-        'A texture has exactly one source: a payload or an asset',
-      );
+  TextureResource(
+    super.id, {
+    this.payload,
+    this.asset,
+    this.content = 'color',
+    super.unknown,
+  }) : assert(
+         (payload == null) != (asset == null),
+         'A texture has exactly one source: a payload or an asset',
+       );
 
   /// The embedded image chunk, or null when [asset] is set.
   final LocalId? payload;
@@ -514,6 +607,7 @@ class RenderTextureResource extends ResourceSpec {
     this.intervalMilliseconds,
     this.filter = 'linear',
     this.wrap = 'clampToEdge',
+    super.unknown,
   });
 
   /// Target width in physical pixels.
@@ -548,6 +642,7 @@ class MaterialResource extends ResourceSpec {
     this.name = '',
     Map<String, PropertyValue>? properties,
     this.asset,
+    super.unknown,
   }) : properties = properties ?? {};
 
   /// The material kind (`physicallyBased`, `unlit`, `fmat`, ...).
@@ -603,6 +698,7 @@ class EnvironmentResource extends ResourceSpec {
     this.skyEnvironment,
     EnvironmentEffectsSpec? effects,
     this.overridesEffects = true,
+    super.unknown,
   }) : effects = effects ?? EnvironmentEffectsSpec();
 
   /// A human-readable label shown in the editor (not load-bearing).
@@ -782,6 +878,8 @@ class EnvironmentEffectsSpec {
     this.autoExposureMaxEv = 4.0,
     this.autoExposureSpeedUp = 3.0,
     this.autoExposureSpeedDown = 1.0,
+    this.unknown = const {},
+    this.unknownInGroups = const {},
   }) : lift = lift ?? Vector3.zero(),
        gamma = gamma ?? Vector3.all(1.0),
        gain = gain ?? Vector3.all(1.0),
@@ -791,6 +889,13 @@ class EnvironmentEffectsSpec {
            globalIlluminationExtents ?? Vector3(20, 10, 20),
        fogColor = fogColor ?? Vector3(0.6, 0.7, 0.8),
        godRaysColor = godRaysColor ?? Vector3.all(1.0);
+
+  /// Effects-level keys this build does not recognize, kept verbatim.
+  final Map<String, Object?> unknown;
+
+  /// Per-group keys this build does not recognize, keyed by group name, so
+  /// a newer engine's setting inside a known group survives a round trip.
+  final Map<String, Map<String, Object?>> unknownInGroups;
 
   /// Creates an independent copy of [other].
   EnvironmentEffectsSpec.copy(EnvironmentEffectsSpec other)
@@ -1095,7 +1200,13 @@ class SkinSpec {
     List<LocalId>? joints,
     required this.inverseBindMatrices,
     this.skeleton,
+    this.unknown = const {},
   }) : joints = joints ?? [];
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// This skin's stable id.
   final LocalId id;
@@ -1190,6 +1301,7 @@ class AnimationChannelSpec {
     required this.keyframes,
     this.keyframesBlob,
     this.interpolation,
+    this.unknown = const {},
   }) {
     assert(
       property != AnimationProperty.componentProperty ||
@@ -1197,6 +1309,11 @@ class AnimationChannelSpec {
       'componentProperty channels must carry componentType and componentProperty',
     );
   }
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// The node this channel animates (primary, id-based binding).
   final LocalId target;
@@ -1247,8 +1364,17 @@ class AnimationChannelSpec {
 /// {@category Documents}
 class AnimationSpec {
   /// Creates an animation with the given stable [id].
-  AnimationSpec(this.id, {this.name = '', List<AnimationChannelSpec>? channels})
-    : channels = channels ?? [];
+  AnimationSpec(
+    this.id, {
+    this.name = '',
+    List<AnimationChannelSpec>? channels,
+    this.unknown = const {},
+  }) : channels = channels ?? [];
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// This animation's stable id.
   final LocalId id;
@@ -1299,7 +1425,13 @@ class PayloadSpec {
     this.height,
     this.length,
     this.bytes,
+    this.unknown = const {},
   });
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// This payload's stable id.
   final LocalId id;
@@ -1331,21 +1463,26 @@ class PayloadSpec {
 /// The image-based-lighting environment for a scene.
 /// {@category Documents}
 sealed class EnvironmentSpec {
-  const EnvironmentSpec();
+  const EnvironmentSpec({this.unknown = const {}});
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 }
 
 /// The built-in procedural studio environment.
 /// {@category Documents}
 class StudioEnvironment extends EnvironmentSpec {
   /// The studio environment.
-  const StudioEnvironment();
+  const StudioEnvironment({super.unknown});
 }
 
 /// An environment built from an external image [asset].
 /// {@category Documents}
 class AssetEnvironment extends EnvironmentSpec {
   /// An environment sourced from [asset].
-  const AssetEnvironment(this.asset);
+  const AssetEnvironment(this.asset, {super.unknown});
 
   /// The environment image asset.
   final AssetRef asset;
@@ -1355,14 +1492,14 @@ class AssetEnvironment extends EnvironmentSpec {
 /// {@category Documents}
 class EmptyEnvironment extends EnvironmentSpec {
   /// The empty environment.
-  const EmptyEnvironment();
+  const EmptyEnvironment({super.unknown});
 }
 
 /// A reflection-free environment with uniform diffuse ambient radiance.
 /// {@category Documents}
 class ConstantEnvironment extends EnvironmentSpec {
   /// Creates a uniform diffuse environment with linear RGB [color].
-  ConstantEnvironment(Vector3 color) : color = color.clone();
+  ConstantEnvironment(Vector3 color, {super.unknown}) : color = color.clone();
 
   /// Linear RGB radiance received by a white Lambertian surface.
   final Vector3 color;
@@ -1377,7 +1514,7 @@ class ConstantEnvironment extends EnvironmentSpec {
 /// {@category Documents}
 class PayloadEnvironment extends EnvironmentSpec {
   /// An environment sourced from the embedded image [payload].
-  const PayloadEnvironment(this.payload);
+  const PayloadEnvironment(this.payload, {super.unknown});
 
   /// The embedded image chunk holding the equirect environment.
   final LocalId payload;
@@ -1391,14 +1528,19 @@ class PayloadEnvironment extends EnvironmentSpec {
 /// {@category Documents}
 sealed class SkySourceSpec {
   /// Const base.
-  const SkySourceSpec();
+  const SkySourceSpec({this.unknown = const {}});
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 }
 
 /// Shows the scene's image-based-lighting environment, optionally blurred.
 /// {@category Documents}
 class EnvironmentSkySpec extends SkySourceSpec {
   /// Creates the spec.
-  EnvironmentSkySpec({this.blurriness = 0.0});
+  EnvironmentSkySpec({this.blurriness = 0.0, super.unknown});
 
   /// How blurred the background is, from `0.0` (sharp) to `1.0`.
   double blurriness;
@@ -1409,8 +1551,11 @@ class EnvironmentSkySpec extends SkySourceSpec {
 /// {@category Documents}
 class FmatSkySpec extends SkySourceSpec {
   /// Creates the spec.
-  FmatSkySpec(this.asset, {Map<String, PropertyValue>? properties})
-    : properties = properties ?? {};
+  FmatSkySpec(
+    this.asset, {
+    Map<String, PropertyValue>? properties,
+    super.unknown,
+  }) : properties = properties ?? {};
 
   /// The `.fmat` source path (relative to the owning package's root).
   final AssetRef asset;
@@ -1430,6 +1575,7 @@ class GradientSkySpec extends SkySourceSpec {
     Vector3? sunDirection,
     Vector3? sunColor,
     this.sunSharpness = 400.0,
+    super.unknown,
   }) : zenithColor = zenithColor ?? Vector3(0.05, 0.18, 0.55),
        horizonColor = horizonColor ?? Vector3(0.45, 0.62, 0.90),
        groundColor = groundColor ?? Vector3(0.16, 0.14, 0.12),
@@ -1470,6 +1616,7 @@ class PhysicalSkySpec extends SkySourceSpec {
     this.turbidity = 10.0,
     Vector3? groundColor,
     this.energy = 1.0,
+    super.unknown,
   }) : sunDirection = sunDirection ?? Vector3(0.4, 0.5, 0.6),
        rayleighColor = rayleighColor ?? Vector3(0.26, 0.41, 0.58),
        mieColor = mieColor ?? Vector3(0.69, 0.73, 0.81),
@@ -1510,7 +1657,12 @@ class PhysicalSkySpec extends SkySourceSpec {
 /// {@category Documents}
 class SkyboxSpec {
   /// Creates the spec.
-  SkyboxSpec(this.source, {this.intensity = 1.0});
+  SkyboxSpec(this.source, {this.intensity = 1.0, this.unknown = const {}});
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// What the sky looks like.
   SkySourceSpec source;
@@ -1542,7 +1694,13 @@ class SunLightSpec {
     this.contactShadowDistance = 0.3,
     this.angularRadius = 0.005,
     this.shadowCasterFaces = 'front',
+    this.unknown = const {},
   });
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// Whether the sun casts cascaded shadows.
   bool castsShadow;
@@ -1605,7 +1763,13 @@ class SkyEnvironmentSpec {
     this.faceResolution = 128,
     this.equirectWidth = 512,
     this.sunLight,
+    this.unknown = const {},
   });
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// The sky baked into the lighting. Must be a shader sky
   /// ([FmatSkySpec], [GradientSkySpec], or [PhysicalSkySpec]); an
@@ -1642,7 +1806,13 @@ class EditorCameraSpec {
     required this.radius,
     required this.target,
     this.orthographic = false,
+    this.unknown = const {},
   });
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// Orbit azimuth in radians.
   final double azimuth;
@@ -1665,8 +1835,16 @@ class EditorCameraSpec {
 /// {@category Documents}
 class EditorStateSpec {
   /// Creates an editor-state record.
-  EditorStateSpec({this.camera, List<LocalId>? selection})
-    : selection = selection ?? [];
+  EditorStateSpec({
+    this.camera,
+    List<LocalId>? selection,
+    this.unknown = const {},
+  }) : selection = selection ?? [];
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// The primary viewport's camera pose, or null when none was attached.
   EditorCameraSpec? camera;
@@ -1688,7 +1866,13 @@ class RenderViewSpec {
     this.antiAliasingMode,
     this.renderScale,
     this.filterQuality,
+    this.unknown = const {},
   });
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// The node whose `CameraComponent` provides this view's camera.
   final LocalId cameraNode;
@@ -1729,7 +1913,13 @@ class StageMetadata {
     this.antiAliasingMode = 'auto',
     this.renderScale = 1.0,
     this.filterQuality = 'medium',
+    this.unknown = const {},
   });
+
+  /// Keys this build of the engine does not recognize, kept verbatim so a
+  /// document written by a newer engine or an extension survives a load and
+  /// save unchanged.
+  final Map<String, Object?> unknown;
 
   /// The anti-aliasing mode name (`none`, `msaa`, `fxaa`, `auto`), the
   /// scene-wide default views inherit.

@@ -84,6 +84,16 @@ class ToolError implements Exception {
 typedef CommandRunner =
     Future<Transaction> Function(String command, Map<String, Object?> params);
 
+/// Runs many commands through the host as one undoable step, named [name]
+/// when the caller supplied one, filling [bindings] with what each call's
+/// alias named.
+typedef BatchRunner =
+    Future<Transaction> Function(
+      List<CommandCall> calls,
+      String? name,
+      Map<String, LocalId> bindings,
+    );
+
 /// Captures the next frame's render graph as a JSON-shaped summary
 /// (passes, timings, data flow, resources). [thumbnails] false is a
 /// metadata-only capture.
@@ -318,6 +328,7 @@ class EditorToolSurface {
     this.screenshot,
     this.windowScreenshot,
     this.commandRunner,
+    this.batchRunner,
     this.undoRunner,
     this.redoRunner,
     this.readCamera,
@@ -396,6 +407,30 @@ class EditorToolSurface {
 
   /// Host-routed mutation, so applied commands reach the host's display.
   final CommandRunner? commandRunner;
+
+  /// Host-routed batch, for the same reason. Null runs on the session.
+  final BatchRunner? batchRunner;
+
+  /// Pushes events to the connected client, set by a transport that can send
+  /// server notifications. Null leaves every subscription poll-only.
+  void Function(String subscription, List<EditorEvent> events)? eventPush;
+
+  /// The subscriptions this connection made.
+  ///
+  /// The bus is shared across every connection and outlives any one of them,
+  /// so a surface that did not make a subscription must not be able to poll
+  /// or cancel it, and one that goes away must not leave its buffers and push
+  /// closures behind. Both follow from owning them here.
+  final Map<String, EventSubscription> _subscriptions = {};
+
+  /// Cancels every subscription this connection made. The transport calls it
+  /// when the client disconnects.
+  void dispose() {
+    for (final subscription in _subscriptions.values) {
+      subscription.cancel();
+    }
+    _subscriptions.clear();
+  }
 
   /// Host-routed undo; returns whether a transaction was undone.
   final Future<bool> Function()? undoRunner;
@@ -1405,6 +1440,129 @@ class EditorToolSurface {
       },
     ),
     ToolDefinition(
+      name: 'run_commands',
+      description:
+          'Run many commands in order as ONE undoable step. Name a call with '
+          '"as" and later calls reference what it created as "\$name" '
+          'wherever an id goes, so a payload and the geometry over it are one '
+          'batch. Nothing is kept unless every call succeeds. Takes document '
+          'and selection commands only. Use this instead of repeated '
+          'run_command whenever you are making more than a couple of edits.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'commands': {
+            'type': 'array',
+            'description': 'The calls, in order.',
+            'items': {
+              'type': 'object',
+              'properties': {
+                'command': {'type': 'string'},
+                'params': {'type': 'object'},
+                'as': {
+                  'type': 'string',
+                  'description':
+                      'Name what this call creates, so a later call can '
+                      'reference it as "\$name" wherever an id goes.',
+                },
+              },
+              'required': ['command'],
+            },
+          },
+          'name': {
+            'type': 'string',
+            'description': 'The label the undo history shows for the step.',
+          },
+        },
+        'required': ['commands'],
+        'additionalProperties': false,
+      },
+    ),
+    ToolDefinition(
+      name: 'search_queries',
+      description:
+          'Search the read surface by name, category, or words in the '
+          'description. Returns each match with its argument schema, ready to '
+          'pass to run_query.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'query': {
+            'type': 'string',
+            'description': 'Substring to match, or empty for every query.',
+          },
+        },
+      },
+    ),
+    ToolDefinition(
+      name: 'run_query',
+      description:
+          'Read the document through a named query. Queries answer in bulk '
+          '(a whole subtree, a whole resource, a whole payload), so prefer '
+          'one query over many small reads. Binary comes back base64-encoded '
+          'under "blobs".',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'query': {'type': 'string'},
+          'params': {'type': 'object'},
+        },
+        'required': ['query'],
+        'additionalProperties': false,
+      },
+    ),
+    ToolDefinition(
+      name: 'subscribe_events',
+      description:
+          'Subscribe to editor events. Returns a subscription id to pass to '
+          'poll_events. Events are coalesced, so a batch of a thousand edits '
+          'is one notification.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'types': {
+            'type': 'array',
+            'description': 'Event names; omit for every event.',
+            'items': {'type': 'string'},
+          },
+        },
+        'additionalProperties': false,
+      },
+    ),
+    ToolDefinition(
+      name: 'poll_events',
+      description:
+          'Drain the events buffered for a subscription, oldest first. '
+          'Reports how many were dropped when a client fell far behind.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'subscription': {'type': 'string'},
+        },
+        'required': ['subscription'],
+        'additionalProperties': false,
+      },
+    ),
+    ToolDefinition(
+      name: 'unsubscribe_events',
+      description: 'Cancel a subscription and release what it buffered.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'subscription': {'type': 'string'},
+        },
+        'required': ['subscription'],
+        'additionalProperties': false,
+      },
+    ),
+    ToolDefinition(
+      name: 'get_protocol_info',
+      description:
+          'The protocol version this editor speaks, what it can do, and the '
+          'event names it emits. Ask before assuming a capability is here.',
+      inputSchema: {'type': 'object', 'properties': {}},
+    ),
+    ToolDefinition(
       name: 'list_resources',
       description:
           'List every resource in the document (geometries, materials, '
@@ -1669,10 +1827,16 @@ class EditorToolSurface {
     String tool,
     Map<String, Object?> args,
   ) async {
+    // TODO(query-parity): get_node still assembles its own answer, because it
+    // mixes in world bounds only the host can compute. Give queries a host
+    // seam and it collapses onto getResource and nodeSubtree like the rest.
     switch (tool) {
       case 'describe_scene':
         return {
-          'roots': [for (final n in _query.roots) _nodeTree(n)],
+          'roots': [
+            for (final node in session.ask('nodeSubtree').body['nodes'] as List)
+              _compactTree(node as Map<String, Object?>),
+          ],
           'animations': [
             for (final a in session.document.animations.values)
               _animationSummary(a),
@@ -1710,10 +1874,13 @@ class EditorToolSurface {
       case 'get_selection':
         return _selectionResult();
       case 'select_node':
-        session.selection.selectOnly(_resolve(_requireRef(args)).id);
+        // Through the command, so this tool and a script take one path.
+        await _invoke('selectNodes', {
+          'nodeIds': [_resolve(_requireRef(args)).id.toToken()],
+        });
         return _selectionResult();
       case 'clear_selection':
-        session.selection.clear();
+        await _invoke('clearSelection', const {});
         return _selectionResult();
       case 'control_animation_preview':
         final control = animationPreview;
@@ -1981,6 +2148,30 @@ class EditorToolSurface {
         return _autoSplitMesh(args);
       case 'separate_mesh_primitives':
         return _separateMeshPrimitives(args);
+      case 'run_commands':
+        return _runCommands(args);
+      case 'search_queries':
+        return {'queries': _searchQueries(args['query'] as String? ?? '')};
+      case 'run_query':
+        return _runQuery(args);
+      case 'subscribe_events':
+        return _subscribeEvents(args);
+      case 'poll_events':
+        return _pollEvents(args);
+      case 'unsubscribe_events':
+        return _unsubscribeEvents(args);
+      case 'get_protocol_info':
+        // Answered without a document, since a client asks what this build
+        // speaks before it decides what to open.
+        final open = _sessionProvider();
+        return {
+          'version': EditorProtocol.version,
+          'capabilities': EditorProtocol.capabilities,
+          'events': EditorEventType.all,
+          'documentOpen': open != null,
+          if (open != null) 'commandCount': open.registry.all.length,
+          if (open != null) 'queryCount': open.queries.all.length,
+        };
       case 'undo':
         final undone = await (undoRunner?.call() ?? Future.value(_undoHere()));
         return {'undone': undone, 'canUndo': session.history.canUndo};
@@ -1988,12 +2179,7 @@ class EditorToolSurface {
         final redone = await (redoRunner?.call() ?? Future.value(_redoHere()));
         return {'redone': redone, 'canRedo': session.history.canRedo};
       case 'list_resources':
-        return {
-          'resources': [
-            for (final entry in session.document.resources.entries)
-              {'id': entry.key.toToken(), 'kind': _resourceKind(entry.value)},
-          ],
-        };
+        return session.ask('listResources').body;
       case 'get_viewport_camera':
         return _cameraResult();
       case 'set_viewport_camera':
@@ -2284,17 +2470,184 @@ class EditorToolSurface {
     ];
   }
 
+  List<Map<String, Object?>> _searchQueries(String query) {
+    final q = query.toLowerCase();
+    bool matches(QueryEntry e) =>
+        q.isEmpty ||
+        e.name.toLowerCase().contains(q) ||
+        e.category.toLowerCase().contains(q) ||
+        e.doc.toLowerCase().contains(q);
+    return [
+      for (final entry in session.queries.all)
+        if (matches(entry))
+          {
+            'name': entry.name,
+            'category': entry.category,
+            'description': entry.doc,
+            'inputSchema': querySchema(entry)['inputSchema'],
+          },
+    ];
+  }
+
+  Map<String, Object?> _runQuery(Map<String, Object?> args) {
+    final name = args['query'];
+    if (name is! String || name.isEmpty) {
+      throw const ToolError('run_query needs a string "query"');
+    }
+    final params =
+        (args['params'] as Map?)?.cast<String, Object?>() ?? const {};
+    final QueryResult result;
+    try {
+      result = session.ask(name, params);
+    } on QueryException catch (e) {
+      throw ToolError(e.message);
+    } on ArgumentError catch (e) {
+      throw ToolError('${e.message}');
+    }
+    // JSON-RPC cannot frame binary, so blobs ride in the body as base64, the
+    // fallback the protocol declares. A transport that can frame them sends
+    // the same blobs beside the body instead, with the body unchanged.
+    return {
+      ...result.body,
+      if (result.blobs.isNotEmpty)
+        'blobs': {
+          for (final blob in result.blobs)
+            blob.id: {
+              'mimeType': blob.mimeType,
+              'byteCount': blob.bytes.lengthInBytes,
+              'base64': base64Encode(blob.bytes),
+            },
+        },
+    };
+  }
+
+  Future<Map<String, Object?>> _runCommands(Map<String, Object?> args) async {
+    final entries = args['commands'];
+    if (entries is! List) {
+      throw const ToolError('run_commands needs a "commands" array');
+    }
+    if (entries.isEmpty) {
+      throw const ToolError('run_commands needs at least one command');
+    }
+    final calls = <CommandCall>[];
+    for (final entry in entries) {
+      if (entry is! Map) {
+        throw const ToolError('Every entry in "commands" must be an object');
+      }
+      try {
+        calls.add(CommandCall.fromJson(entry.cast<String, Object?>()));
+      } on CommandException catch (e) {
+        throw ToolError(e.message);
+      }
+    }
+    final name = args['name'];
+    final label = name is String && name.isNotEmpty ? name : null;
+    final bindings = <String, LocalId>{};
+    final runner = batchRunner;
+    // Caught around both paths, since a host-routed batch throws the same
+    // failure and a client should read it, not a stack trace.
+    final Transaction transaction;
+    try {
+      transaction = runner != null
+          ? await runner(calls, label, bindings)
+          : session.runAll(
+              calls,
+              name: label ?? 'Batch edit',
+              bindings: bindings,
+            );
+    } on BatchException catch (e) {
+      throw ToolError(e.message);
+    } on CommandException catch (e) {
+      throw ToolError(e.message);
+    }
+    return {
+      'ok': true,
+      'applied': transaction.name,
+      'commandCount': calls.length,
+      'recordCount': transaction.records.length,
+      'noOp': transaction.isEmpty,
+      'canUndo': session.history.canUndo,
+      'created': _createdIn(transaction),
+      if (bindings.isNotEmpty)
+        'bindings': {
+          for (final entry in bindings.entries)
+            entry.key: entry.value.toToken(),
+        },
+    };
+  }
+
+  Map<String, Object?> _subscribeEvents(Map<String, Object?> args) {
+    final types = args['types'];
+    final wanted = <String>[];
+    if (types == null) {
+      wanted.addAll(EditorEventType.all);
+    } else if (types is List) {
+      for (final type in types) {
+        if (type is! String) {
+          throw const ToolError('"types" must be an array of event names');
+        }
+        wanted.add(type);
+      }
+    } else {
+      throw const ToolError('"types" must be an array of event names');
+    }
+    try {
+      // The closure names the subscription it belongs to, which only exists
+      // once subscribe returns; nothing can fire before then.
+      late final EventSubscription subscription;
+      subscription = session.events.subscribe(
+        wanted,
+        onEvents: (events) => eventPush?.call(subscription.id, events),
+      );
+      _subscriptions[subscription.id] = subscription;
+      return {
+        'subscription': subscription.id,
+        'types': subscription.types.toList(),
+        'pushed': eventPush != null,
+      };
+    } on ArgumentError catch (e) {
+      throw ToolError('${e.message}');
+    }
+  }
+
+  EventSubscription _requireSubscription(Map<String, Object?> args) {
+    final id = args['subscription'];
+    if (id is! String || id.isEmpty) {
+      throw const ToolError('Expected a "subscription" id');
+    }
+    // Looked up among this connection's own, so one client cannot reach
+    // another's by guessing an id.
+    final subscription = _subscriptions[id];
+    if (subscription == null) {
+      throw ToolError(
+        'No subscription "$id" on this connection; it may have been '
+        'cancelled, or it belongs to another client',
+      );
+    }
+    return subscription;
+  }
+
+  Map<String, Object?> _pollEvents(Map<String, Object?> args) {
+    final subscription = _requireSubscription(args);
+    // Deliver whatever this turn produced before draining, so a client that
+    // edits and immediately polls does not have to poll twice.
+    session.events.flush();
+    final drained = subscription.drain();
+    return {
+      'events': [for (final event in drained.events) event.toJson()],
+      'dropped': drained.dropped,
+    };
+  }
+
+  Map<String, Object?> _unsubscribeEvents(Map<String, Object?> args) {
+    final subscription = _requireSubscription(args)..cancel();
+    _subscriptions.remove(subscription.id);
+    return {'ok': true};
+  }
+
   bool _undoHere() => session.undo();
 
   bool _redoHere() => session.redo();
-
-  String _resourceKind(ResourceSpec spec) => switch (spec) {
-    GeometryResource() => 'geometry',
-    TextureResource() => 'texture',
-    RenderTextureResource() => 'renderTexture',
-    MaterialResource() => 'material',
-    EnvironmentResource() => 'environment',
-  };
 
   ViewportCameraPose _requireCamera() {
     final pose = readCamera?.call();
@@ -2315,11 +2668,34 @@ class EditorToolSurface {
     };
   }
 
+  /// Runs [command] the way `run_command` does, so tools that wrap a command
+  /// cannot drift from it.
+  Future<void> _invoke(String command, Map<String, Object?> params) async {
+    try {
+      commandRunner != null
+          ? await commandRunner!(command, params)
+          : session.run(command, params);
+    } on CommandException catch (e) {
+      throw ToolError(e.message);
+    }
+  }
+
   Future<Map<String, Object?>> _dispatchCommand(
     String command,
     Map<String, Object?> params,
   ) async {
     try {
+      final entry = session.registry.lookup(command);
+      if (entry != null && entry.kind == CommandKind.application) {
+        // Asynchronous, and outside the document, so it reports what it did
+        // rather than a transaction.
+        await session.invoke(command, params);
+        return {
+          'ok': true,
+          'applied': command,
+          'canUndo': session.history.canUndo,
+        };
+      }
       final transaction = commandRunner != null
           ? await commandRunner!(command, params)
           : session.run(command, params);
@@ -2679,6 +3055,12 @@ class EditorToolSurface {
           AnimationChange(value: final n),
         ) =>
           ('animation', o == null, n != null),
+        (
+          ChangeSlot.poolPayload,
+          PayloadChange(value: final o),
+          PayloadChange(value: final n),
+        ) =>
+          ('payload', o == null, n != null),
         _ => ('', false, false),
       };
       if (wasAbsent && isPresent) {
@@ -2961,13 +3343,20 @@ class EditorToolSurface {
     return {'node': node.id.toToken(), 'highlighted': highlight(node.id, names)};
   }
 
-  Map<String, Object?> _nodeTree(NodeSpec node) => {
-    'id': node.id.toToken(),
-    'path': _query.namePathOf(node.id),
-    'name': node.name,
-    'components': [for (final c in node.components) c.type],
+  /// The compact tree an agent reads first, projected from the `nodeSubtree`
+  /// query so both describe the same data. Component types only, since the
+  /// whole point of this view is to be small enough to take in at once.
+  Map<String, Object?> _compactTree(Map<String, Object?> node) => {
+    'id': node['id'],
+    'path': node['path'],
+    'name': node['name'],
+    'components': [
+      for (final component in node['components'] as List)
+        (component as Map)['type'],
+    ],
     'children': [
-      for (final child in _query.childrenOf(node.id)) _nodeTree(child),
+      for (final child in (node['children'] as List? ?? const []))
+        _compactTree(child as Map<String, Object?>),
     ],
   };
 
@@ -2991,7 +3380,7 @@ class EditorToolSurface {
           'type': c.type,
           'properties': {
             for (final entry in c.properties.entries)
-              entry.key: _propertyJson(entry.value),
+              entry.key: propertyValueToJson(entry.value),
           },
           // Declared kinds for the carried properties, when the type's
           // schema is known (see describe_component_type for the full one).
@@ -3192,7 +3581,7 @@ class EditorToolSurface {
     Object? valueAt(int index) {
       if (blobValues != null) {
         return index < blobValues.length
-            ? _propertyJson(blobValues[index])
+            ? propertyValueToJson(blobValues[index])
             : null;
       }
       final base = baseOf(index);
@@ -3399,38 +3788,6 @@ class EditorToolSurface {
       'scale': _vec3(t.scale),
     },
     MatrixTransform m => {'matrix': m.matrix.storage.toList()},
-  };
-
-  Object? _propertyJson(PropertyValue value) => switch (value) {
-    BoolValue v => v.value,
-    IntValue v => v.value,
-    DoubleValue v => v.value,
-    StringValue v => v.value,
-    Vec2Value v => {'x': v.value.x, 'y': v.value.y},
-    Vec3Value v => {'x': v.value.x, 'y': v.value.y, 'z': v.value.z},
-    Vec4Value v => {
-      'x': v.value.x,
-      'y': v.value.y,
-      'z': v.value.z,
-      'w': v.value.w,
-    },
-    QuaternionValue v => {
-      '\$quat': {
-        'x': v.value.x,
-        'y': v.value.y,
-        'z': v.value.z,
-        'w': v.value.w,
-      },
-    },
-    Matrix4Value v => v.value.storage.toList(),
-    ColorValue v => {'r': v.r, 'g': v.g, 'b': v.b, 'a': v.a},
-    ResourceRefValue v => {'\$resource': v.id.toToken()},
-    NodeRefValue v => {'\$node': v.id.toToken()},
-    ListValue v => [for (final e in v.values) _propertyJson(e)],
-    MapValue v => {
-      for (final entry in v.values.entries)
-        entry.key: _propertyJson(entry.value),
-    },
   };
 
   Map<String, Object?> _vec3(Vector3 v) => {'x': v.x, 'y': v.y, 'z': v.z};
