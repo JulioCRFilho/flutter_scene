@@ -15,36 +15,43 @@ Delete it once the distribution pin moves to a stable that carries the rename
 (3.50), where master and stable agree.
 
 diff --git a/apps/flutter_scene_editor_app/lib/main.dart b/apps/flutter_scene_editor_app/lib/main.dart
-index f6483957..31d47f0f 100644
 --- a/apps/flutter_scene_editor_app/lib/main.dart
 +++ b/apps/flutter_scene_editor_app/lib/main.dart
-@@ -31,7 +31,7 @@ void main() {
-   // (flutter/flutter#30701) and the dart-define arrives on its own.
-   isWindowingEnabled = true;
-   WidgetsFlutterBinding.ensureInitialized();
+@@ -40,7 +40,7 @@ void main() {
+   // funnels through this gate, so an unsaved document is prompted once no
+   // matter how the user tried to leave.
+   final closeGate = _CloseGate();
 -  final controller = RegularWindowController(
 +  final controller = WindowController(
      size: const Size(1280, 800),
      // The runner styles the window with a hidden title bar by this title
      // (see AppDelegate.swift); keep the two in sync.
-@@ -39,13 +39,13 @@ void main() {
-     delegate: _MainWindowDelegate(),
+@@ -48,7 +48,7 @@ void main() {
+     delegate: _MainWindowDelegate(closeGate),
    );
    runWidget(
--    RegularWindow(controller: controller, child: const FlutterSceneEditorApp()),
-+    Window(controller: controller, child: const FlutterSceneEditorApp()),
-   );
- }
- 
- /// Quits the app when the main editor window closes, taking any floating
- /// panel windows with it.
+-    RegularWindow(
++    Window(
+       controller: controller,
+       child: _FlutterSceneEditorApp(closeGate: closeGate),
+     ),
+@@ -84,13 +84,13 @@ class _CloseGate {
+ /// The close button normally destroys the window outright; instead the user
+ /// is asked first (through [_CloseGate]) and the window is only destroyed
+ /// once they confirm — "Cancel" keeps the editor running.
 -class _MainWindowDelegate with RegularWindowControllerDelegate {
 +class _MainWindowDelegate with WindowControllerDelegate {
+   _MainWindowDelegate(this._closeGate);
+ 
+   final _CloseGate _closeGate;
+ 
    @override
-   void onWindowDestroyed() {
-     exit(0);
+-  void onWindowCloseRequested(RegularWindowController controller) {
++  void onWindowCloseRequested(WindowController controller) {
+     unawaited(() async {
+       final response = await _closeGate.confirmClose();
+       if (response == AppExitResponse.exit && !controller.isDestroyed) {
 diff --git a/packages/flutter_scene_editor/lib/src/shell/docking_shell.dart b/packages/flutter_scene_editor/lib/src/shell/docking_shell.dart
-index c31d7bc0..6f00d18c 100644
 --- a/packages/flutter_scene_editor/lib/src/shell/docking_shell.dart
 +++ b/packages/flutter_scene_editor/lib/src/shell/docking_shell.dart
 @@ -81,7 +81,7 @@ class _DockingShellState extends State<DockingShell> {

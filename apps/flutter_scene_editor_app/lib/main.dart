@@ -40,7 +40,7 @@ void main() {
   // funnels through this gate, so an unsaved document is prompted once no
   // matter how the user tried to leave.
   final closeGate = _CloseGate();
-  final controller = WindowController(
+  final controller = RegularWindowController(
     size: const Size(1280, 800),
     // The runner styles the window with a hidden title bar by this title
     // (see AppDelegate.swift); keep the two in sync.
@@ -48,7 +48,7 @@ void main() {
     delegate: _MainWindowDelegate(closeGate),
   );
   runWidget(
-    Window(
+    RegularWindow(
       controller: controller,
       child: _FlutterSceneEditorApp(closeGate: closeGate),
     ),
@@ -84,13 +84,13 @@ class _CloseGate {
 /// The close button normally destroys the window outright; instead the user
 /// is asked first (through [_CloseGate]) and the window is only destroyed
 /// once they confirm — "Cancel" keeps the editor running.
-class _MainWindowDelegate with WindowControllerDelegate {
+class _MainWindowDelegate with RegularWindowControllerDelegate {
   _MainWindowDelegate(this._closeGate);
 
   final _CloseGate _closeGate;
 
   @override
-  void onWindowCloseRequested(WindowController controller) {
+  void onWindowCloseRequested(RegularWindowController controller) {
     unawaited(() async {
       final response = await _closeGate.confirmClose();
       if (response == AppExitResponse.exit && !controller.isDestroyed) {
