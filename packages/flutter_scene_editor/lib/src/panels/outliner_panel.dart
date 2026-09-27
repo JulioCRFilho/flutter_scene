@@ -165,7 +165,7 @@ class _OutlinerPanelState extends State<OutlinerPanel> {
                           entries[index] is _VisibleInsertion
                           ? _kInsertionExtent
                           : _kRowExtent,
-                      scrollCacheExtent: const ScrollCacheExtent.pixels(400),
+                      cacheExtent: 400.0,
                       itemBuilder: (context, index) {
                         final entry = entries[index];
                         return switch (entry) {

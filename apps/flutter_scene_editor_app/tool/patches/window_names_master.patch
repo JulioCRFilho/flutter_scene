@@ -50,7 +50,7 @@ diff --git a/apps/flutter_scene_editor_app/lib/main.dart b/apps/flutter_scene_ed
 +  void onWindowCloseRequested(WindowController controller) {
      unawaited(() async {
        final response = await _closeGate.confirmClose();
-       if (response == AppExitResponse.exit && !controller.isDestroyed) {
+       if (response == AppExitResponse.exit) {
 diff --git a/packages/flutter_scene_editor/lib/src/shell/docking_shell.dart b/packages/flutter_scene_editor/lib/src/shell/docking_shell.dart
 --- a/packages/flutter_scene_editor/lib/src/shell/docking_shell.dart
 +++ b/packages/flutter_scene_editor/lib/src/shell/docking_shell.dart

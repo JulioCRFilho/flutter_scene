@@ -93,7 +93,7 @@ class _MainWindowDelegate with RegularWindowControllerDelegate {
   void onWindowCloseRequested(RegularWindowController controller) {
     unawaited(() async {
       final response = await _closeGate.confirmClose();
-      if (response == AppExitResponse.exit && !controller.isDestroyed) {
+      if (response == AppExitResponse.exit) {
         controller.destroy();
       }
     }());
