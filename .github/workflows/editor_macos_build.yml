@@ -1,0 +1,105 @@
+name: Editor macOS Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      flutter_channel:
+        description: 'Flutter channel or git commit (leave empty to use pinned flutter.version)'
+        required: false
+        default: ''
+  push:
+    branches: [ master ]
+    paths:
+      - 'apps/flutter_scene_editor_app/**'
+      - 'packages/flutter_scene/**'
+      - 'packages/flutter_scene_editor/**'
+
+jobs:
+  build-macos:
+    name: Build & Package macOS DMG
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Check out Flutter SDK
+        run: |
+          CUSTOM="${{ inputs.flutter_channel }}"
+          if [ -n "$CUSTOM" ]; then
+            echo "Using custom Flutter channel/revision: $CUSTOM"
+            git clone https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+            git -C "$RUNNER_TEMP/flutter" checkout "$CUSTOM"
+          else
+            REVISION=$(grep -v '^#' apps/flutter_scene_editor_app/flutter.version | tr -d '[:space:]')
+            echo "Using pinned Flutter revision: $REVISION"
+            git clone https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+            git -C "$RUNNER_TEMP/flutter" checkout "$REVISION"
+          fi
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+
+      - name: Configure Flutter
+        run: |
+          flutter config --no-analytics
+          flutter config --enable-macos-desktop
+          flutter doctor -v
+          flutter precache --macos
+
+      - name: Resolve workspace dependencies
+        run: flutter pub get
+
+      - name: Package macOS Editor
+        working-directory: apps/flutter_scene_editor_app
+        env:
+          CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          NOTARY_PROFILE: ${{ secrets.MACOS_NOTARY_PROFILE }}
+          NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+        run: |
+          ARGS=(--platform macos)
+          if [ -n "$CERTIFICATE_P12" ]; then
+            echo "Configuring keychain for code signing..."
+            KEYCHAIN="$RUNNER_TEMP/editor-signing.keychain-db"
+            KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+            security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+            security set-keychain-settings -lut 21600 "$KEYCHAIN"
+            security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+            printf '%s' "$CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+            security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+              -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+            rm "$RUNNER_TEMP/cert.p12"
+            security set-key-partition-list -S apple-tool:,apple:,codesign: \
+              -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+            security list-keychains -d user -s "$KEYCHAIN" \
+              $(security list-keychains -d user | sed 's/[" ]//g')
+            security default-keychain -s "$KEYCHAIN"
+            xcrun notarytool store-credentials "$NOTARY_PROFILE" \
+              --apple-id "$NOTARY_APPLE_ID" \
+              --team-id "$NOTARY_TEAM_ID" \
+              --password "$NOTARY_PASSWORD" \
+              --keychain "$KEYCHAIN"
+            IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+              | awk '/Developer ID Application/ {print $2; exit}')
+            if [ -n "$IDENTITY" ]; then
+              echo "Signing with identity $IDENTITY"
+              ARGS+=(--sign-identity "$IDENTITY" \
+                     --notarize-profile "$NOTARY_PROFILE" \
+                     --keychain "$KEYCHAIN")
+            fi
+          else
+            echo "No MACOS_CERTIFICATE_P12 found. Proceeding with unsigned build..."
+          fi
+          dart tool/package_editor.dart "${ARGS[@]}"
+
+      - name: Upload macOS Distribution Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: flutter-scene-editor-macos
+          path: apps/flutter_scene_editor_app/build/dist/*
+          if-no-files-found: error
