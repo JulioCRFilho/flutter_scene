@@ -461,10 +461,12 @@ Future<void> loadSmokeModels() async {
   _skinnedModel ??= await Node.fromGlbAsset('assets_src/two_triangles.glb');
 }
 
-/// The skinned and morphed model preloaded by [loadMorphSkinnedModel], plus
-/// the same model at rest weights beside it as the reference.
+/// The skinned and morphed model preloaded by [loadMorphSkinnedModel], the
+/// same model at rest weights beside it as the reference, and an unskinned
+/// copy at the same weights.
 Node? _morphSkinnedModel;
 Node? _morphSkinnedRest;
+Node? _morphUnskinnedModel;
 
 /// Imports the synthetic skinned and morphed GLB and pins its morph weights.
 /// The bytes are built in code (see `synthetic_morph_glb.dart`), so the scene
@@ -484,8 +486,22 @@ Future<void> loadMorphSkinnedModel() async {
       '${geometry.runtimeType}',
     );
   }
+  final unskinned = await Node.fromGlbBytes(
+    buildMorphSkinnedGlb(skinned: false),
+  );
+  final unskinnedMesh = unskinned.meshNodes.first;
+  unskinnedMesh.setMorphWeights(kMorphSkinnedWeights);
+  final unskinnedGeometry = unskinnedMesh.mesh!.primitives.first.geometry;
+  if (unskinnedGeometry is! MorphedUnskinnedGeometry ||
+      !unskinnedGeometry.usesGpuMorphing) {
+    throw StateError(
+      'morph_skinned expects GPU-morphed unskinned geometry, got '
+      '${unskinnedGeometry.runtimeType}',
+    );
+  }
   _morphSkinnedRest = rest;
   _morphSkinnedModel = model;
+  _morphUnskinnedModel = unskinned;
 }
 
 /// The skinned tube whose weights sum to 0.98, for the skinned_weight_sum
@@ -605,6 +621,46 @@ class _NormalsProbePass extends CustomRenderPass {
   @override
   void execute(RenderPassContext context) {}
 }
+
+/// A square of half-width [half] facing the camera at depth [z], colored by
+/// [corners] (one RGBA per corner). Both windings are indexed so culling
+/// never hides it.
+Node _depthBiasQuad(
+  Geometry geometry,
+  double half,
+  double z,
+  UnlitMaterial material, {
+  List<List<double>> corners = const [
+    [1, 1, 1, 1],
+    [1, 1, 1, 1],
+    [1, 1, 1, 1],
+    [1, 1, 1, 1],
+  ],
+}) {
+  const positions = [(-1, -1), (1, -1), (1, 1), (-1, 1)];
+  final vertices = Float32List(4 * 18);
+  for (var i = 0; i < 4; i++) {
+    final (x, y) = positions[i];
+    vertices.setAll(i * 18, [
+      x * half, y * half, 0, 0, 0, -1, //
+      (x + 1) / 2, (y + 1) / 2, 0, 0, ...corners[i], 0, 0, 0, 0,
+    ]);
+  }
+  geometry.uploadVertexData(
+    vertices,
+    4,
+    Uint16List.fromList([0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2]),
+  );
+  return Node(mesh: Mesh(geometry, material))
+    ..localTransform = vm.Matrix4.translation(vm.Vector3(0, 0, z));
+}
+
+UnlitMaterial _depthBiasMaterial(vm.Vector4 color, {double depthBias = 0}) =>
+    UnlitMaterial()
+      ..baseColorFactor = color
+      ..alphaMode = color.w < 1 ? AlphaMode.blend : AlphaMode.opaque
+      ..doubleSided = true
+      ..depthBias = depthBias;
 
 /// The smoke scene set. Mostly procedural for determinism; the final scenes
 /// exercise a custom `.fmat` material compiled by the build hook.
@@ -1919,25 +1975,87 @@ final List<SmokeScene> kSmokeScenes = <SmokeScene>[
   // displacement with it, which is what separates the two orderings, and the
   // per-corner vertex colors make a twist or a flip read directly. The
   // second copy is the same mesh and skin at rest weights, so a morph that
-  // stops blending collapses the pair into two identical shapes.
-  // [loadMorphSkinnedModel] asserts the geometry took the GPU path.
+  // stops blending collapses the pair into two identical shapes. The third
+  // copy has no skin, so it covers the unskinned morph path and stands
+  // straight while still bulging, hooking, and twisting.
+  // [loadMorphSkinnedModel] asserts every geometry took the GPU path.
   SmokeScene('morph_skinned', () {
     final scene = Scene();
     Node placed(Node model, double x) => Node()
       ..localTransform = vm.Matrix4.translation(vm.Vector3(x, 0, 0))
       ..add(model);
-    scene.add(placed(_morphSkinnedRest!, -1.0));
-    scene.add(placed(_morphSkinnedModel!, 1.0));
+    scene.add(placed(_morphSkinnedRest!, -1.1));
+    scene.add(placed(_morphSkinnedModel!, 0.8));
+    scene.add(placed(_morphUnskinnedModel!, 2.4));
     return (
       scene: scene,
       // Imported glTF sits behind the root handedness flip, so the model's
       // front faces -z; the camera views it from there.
       camera: PerspectiveCamera(
-        position: vm.Vector3(0.5, 2.0, -5.6),
-        target: vm.Vector3(0, 0.9, 0),
+        position: vm.Vector3(0.6, 2.0, -7.4),
+        target: vm.Vector3(0.6, 1.0, 0),
       ),
     );
   }, preload: loadMorphSkinnedModel),
+  // Three translucent squares behind an opaque wall, drawn back to front on
+  // one pipeline. The middle one is CPU-morphed (its 2100 targets overflow
+  // the delta texture) with a 0.75 depth bias, so it takes the full geometry
+  // bind. The green square sits 0.2 behind the wall with no bias and must
+  // stay hidden; inheriting the middle draw's bias pulls it in front.
+  SmokeScene('depth_bias_rebind', () {
+    final morphed = MorphedUnskinnedGeometry(
+      MorphTargetData(
+        vertexCount: 4,
+        targetCount: 2100,
+        positionDeltas: Float32List(2100 * 4 * 3),
+      ),
+    );
+    if (morphed.usesGpuMorphing) {
+      throw StateError('depth_bias_rebind expects CPU morphing');
+    }
+    final blue = vm.Vector4(0.1, 0.2, 1, 0.9);
+    final scene = Scene()
+      ..add(
+        _depthBiasQuad(
+          UnskinnedGeometry(),
+          1.5,
+          5.0,
+          _depthBiasMaterial(vm.Vector4(1, 1, 1, 1)),
+          corners: const [
+            [0.9, 0.05, 0.05, 1],
+            [0.6, 0.0, 0.3, 1],
+            [0.9, 0.3, 0.0, 1],
+            [0.5, 0.05, 0.1, 1],
+          ],
+        ),
+      )
+      ..add(
+        _depthBiasQuad(UnskinnedGeometry(), 1, 8.0, _depthBiasMaterial(blue)),
+      )
+      ..add(
+        _depthBiasQuad(
+          morphed,
+          1,
+          6.5,
+          _depthBiasMaterial(blue, depthBias: 0.75),
+        ),
+      )
+      ..add(
+        _depthBiasQuad(
+          UnskinnedGeometry(),
+          0.5,
+          5.2,
+          _depthBiasMaterial(vm.Vector4(0, 1, 0, 0.9)),
+        ),
+      );
+    return (
+      scene: scene,
+      camera: PerspectiveCamera(
+        position: vm.Vector3.zero(),
+        target: vm.Vector3(0, 0, 1),
+      ),
+    );
+  }),
   // The skinned tube with its weights summing to 0.98, placed 3 km from the
   // origin. A joint matrix carries the model's world position, so an
   // unnormalized weight sum pulls every vertex toward the origin by 2% of

@@ -181,6 +181,47 @@ final Map<String, ExampleSettings Function()> settingsDefaults = {
     ..ambientOcclusion.intensity = 1.4,
   // A strong sun for the adaptation walk: the outdoor half of the path
   // should overexpose while the meter is adapted to the room.
+  // The dice table: a warm sun from the south-east, two cascades (the view is
+  // small), a soft environment, and bloom for the neon pips and sparks.
+  'Dice Shadows': () => ExampleSettings()
+    ..lightAzimuthDegrees = 169.8
+    ..lightElevationDegrees = 46.8
+    ..lightIntensity = 3.0
+    ..lightColor.setValues(1.0, 0.97, 0.92)
+    ..shadowSoftness = 0.105
+    ..shadowCascadeCount = 2
+    ..environmentIntensity = 0.7
+    ..exposure = 1.43
+    ..filterQuality = FilterQuality.high
+    ..colorGrading.enabled = true
+    ..colorGrading.brightness = 0.974
+    ..colorGrading.contrast = 1.011
+    ..colorGrading.saturation = 1.071
+    ..bloom.enabled = true
+    ..bloom.threshold = 1.39
+    ..bloom.intensity = 0.28
+    ..bloom.scatter = 0.324
+    ..bloom.lensFlare.enabled = true
+    ..bloom.lensFlare.intensity = 0.473
+    ..bloom.lensFlare.ghostCount = 4
+    ..bloom.lensFlare.ghostSpacing = 0.3
+    ..bloom.lensFlare.haloRadius = 0.35
+    ..bloom.lensFlare.haloIntensity = 1.0
+    ..bloom.lensFlare.chromaticAberration = 0.005
+    ..depthOfField.enabled = true
+    // Focus and blur scale are re-fit to the view every resize; see
+    // diceDepthOfField. 15.0 is the distance the lens below was tuned at.
+    ..depthOfField.focusDistance = 15.0
+    ..depthOfField.fStop = 1.06
+    ..depthOfField.focalLength = 0.154
+    ..depthOfField.sensorHeight = 0.024
+    ..depthOfField.maxForegroundBlur = 24.0
+    ..depthOfField.maxBackgroundBlur = 32.0
+    ..depthOfField.quality = DepthOfFieldQuality.high
+    ..vignette.enabled = true
+    ..vignette.intensity = 0.297
+    ..vignette.radius = 0.75
+    ..vignette.smoothness = 0.5,
   'Auto Exposure': () => ExampleSettings()..lightIntensity = 7.0,
   'Stress Tests': () => ExampleSettings()..directionalLightEnabled = false,
   // A cinematic grade for the dark materialize stage: no key light (the
@@ -336,7 +377,11 @@ class _MyAppState extends State<MyApp> {
       'Split Screen': (context) => const ExampleSplitScreen(),
       'Stress Tests': (context) => const ExampleStressTests(),
     };
-    selectedExample = examples.keys.first;
+    // `--dart-define=EXAMPLE=<name>` opens straight into that example.
+    const initial = String.fromEnvironment('EXAMPLE');
+    selectedExample = examples.containsKey(initial)
+        ? initial
+        : examples.keys.first;
     resetExampleSettings(settingsDefaults[selectedExample]);
 
     _ready = Future.wait([
